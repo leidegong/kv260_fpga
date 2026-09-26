@@ -2,7 +2,7 @@
 
 Status: PASS. Actual Verilator RTL simulation; no Vivado synthesis, implementation or board test.
 
-Seed: 12345; duration: 196.86 s.
+Seed: 12345; duration: 318.09 s.
 
 | Module | Configuration | Result |
 |---|---|---|
@@ -17,6 +17,13 @@ Seed: 12345; duration: 196.86 s.
 | gemv_row | PAGE=8192, DATA_W=512, LANES=32, jobs=9 | PASS gemv lanes=32 page=8192 data_w=512 jobs=9 cycles=4309 stalled=37 act_stalled=1398 partial_reset=1 |
 | gemv_row | PAGE=8192, DATA_W=512, LANES=128, jobs=9 | PASS gemv lanes=128 page=8192 data_w=512 jobs=9 cycles=3053 stalled=58 act_stalled=1464 partial_reset=1 |
 | gemv_row | PAGE=4096, DATA_W=128, LANES=32, jobs=9 | PASS gemv lanes=32 page=4096 data_w=128 jobs=9 cycles=6096 stalled=46 act_stalled=3002 partial_reset=1 |
+| fp32_rsqrt | n=76 | PASS fp32_rsqrt n=76 cycles=420 stalled=342 |
+| fp32_exp | n=91 | PASS fp32_exp n=91 cycles=501 stalled=408 |
+| spu_rmsnorm | jobs=4, libm_ulp<=8 (obs 0) | PASS spu_rmsnorm jobs=4 cycles=1255 stalled=905 |
+| spu_silu_mul | n=99, libm_ulp<=32 (obs 2) | PASS spu_silu_mul n=99 cycles=534 stalled=433 |
+| gemv_tile | ROWS=2, PAGE=8192, DATA_W=512, LANES=32, jobs=4 | PASS gemv_tile rows=2 lanes=32 page=8192 data_w=512 jobs=4 cycles=1533 stalled=42 |
+| gemv_tile | ROWS=4, PAGE=8192, DATA_W=512, LANES=32, jobs=4 | PASS gemv_tile rows=4 lanes=32 page=8192 data_w=512 jobs=4 cycles=1596 stalled=36 |
+| axi_page_bridge | DATA_W=128, jobs=3 | PASS axi_page_bridge jobs=3 data_w=128 cycles=7300 |
 | axi_read_master | DATA_W=128, MAX_BEATS=256, cases=8 | PASS axi data_w=128 cases=8 cycles=3240 ar_stalls=16 out_stalls=2054 resets=8 |
 | axi_read_master | DATA_W=128, MAX_BEATS=16, cases=9 | PASS axi data_w=128 cases=9 cycles=4263 ar_stalls=172 out_stalls=2598 resets=9 |
 | axi_read_master | DATA_W=64, MAX_BEATS=256, cases=8 | PASS axi data_w=64 cases=8 cycles=5609 ar_stalls=22 out_stalls=3590 resets=8 |
@@ -35,6 +42,12 @@ axi_read_master descriptors match `kv260.axi_plan.split_read` (4 KiB boundary an
 
 axi_write_master uses the same split via `split_write` (identical rules). Outstanding 1: AW, W beats, then B before the next AW. Full WSTRB on aligned beats. A nonzero BRESP stops further AW. Not a driver and not a board measurement.
 
+SPU leaves (`fp32_rsqrt`, `fp32_exp`, `spu_rmsnorm`, `spu_silu_mul`) are bit-exact against `rtl_spu_golden.py` (same seeds/NR/Taylor as `fp32_pkg.sv`). They are NOT bit-exact against host libm; see rtl/README.md for ULP/relative budgets vs `accel_golden`.
+
+gemv_tile runs an R-interleaved `pack_stream` (R=ROWS) through one demux into ROWS `scale_accum` lanes with shared/replayed activations. Still not a full layer/DCU.
+
+axi_page_bridge is sim-only: `axi_read_master` loads pack_stream bytes into `gemv_row`, optional `axi_write_master` stores the FP32 result. No DDR PHY or multi-HP reorder.
+
 Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.
 
 Reproduce from step3: `python3 run_rtl_tests.py`.
@@ -45,14 +58,27 @@ Reproduce from step3: `python3 run_rtl_tests.py`.
 - `rtl/page_demux.sv`: `a882e5012de0aaf24816bbb3a363fdcd376b626e1ef4044daff8729b8da094d6`
 - `rtl/scale_accum.sv`: `a9d8638933d9285c2abe425bc885b5a8a26d1570b999f4e74b9457dad3d924a6`
 - `rtl/gemv_row.sv`: `6d37f7824a1798483cba85e9f0df863bb6bf8681f0747214cadf59497a213323`
+- `rtl/gemv_tile.sv`: `a8dd326b5599fa1191900cbc6860f0614916ad0f6454b3a072ccce54042b049b`
+- `rtl/fp32_pkg.sv`: `491abcc43b144e0074ec0f02f168ee7214b7fe2eb6a0d4da4c8167db7ea9ed96`
+- `rtl/fp32_rsqrt.sv`: `be8a67b7ddc74145c85d4337a15ed64b559505b8b7de52f60563bcafc64b63d2`
+- `rtl/fp32_exp.sv`: `212a01e82eb33ae71397e94effc46f1a2e7122bfc2c0ef7fef20e7be744252ce`
+- `rtl/spu_rmsnorm.sv`: `9a47c57ed73fcd75e811a21924572e1f41bbe8ecb465557a44936994aef275da`
+- `rtl/spu_silu_mul.sv`: `c22ada910c7820540f260886b63277552ed387ddaf853f585fa8dfee0bc5e429`
+- `rtl/axi_page_bridge.sv`: `1f9a6909db4368b1162c2f6d8942344a8352a6a8ef80aa73aaea266138c0e463`
 - `rtl/axi_read_master.sv`: `e228c9531dd3e2db1cf4432f68e7bf4a3cd47a7bd676c51f4b4af56537358266`
 - `rtl/axi_write_master.sv`: `50aee71f364ce79d8385e0b0ad92d1ea1d4896b90fa4f74dd0e566d9233111f4`
 - `rtl/tb/dot_main.cpp`: `b95e8f71a280259cbbbcd69647a0712d80aae26ab5a1555d5a5973dda5e3a741`
 - `rtl/tb/page_main.cpp`: `f242c4debacf2965aa8ef15bf479db35248528968bc2574ebb6c1f9b24da97a4`
 - `rtl/tb/scale_main.cpp`: `1c9ab21234bb724643841c29d3fb84bf3695d5f28918ca5e38d136e752426321`
 - `rtl/tb/gemv_main.cpp`: `4f8dfe074617cd4b6bb6ebf37fb6e9153a6fcee6c4332b8e43f392c58934a824`
+- `rtl/tb/gemv_tile_main.cpp`: `6f7b9b891b58db4a2f903b222e7eb7cc0fa5804257d046692c1456d227381f29`
+- `rtl/tb/spu_rmsnorm_main.cpp`: `e89c62fde1d0816d62a0c968ca9f7bd35d782eb437a69571469b9bb258959ec5`
+- `rtl/tb/spu_silu_main.cpp`: `2bff5acdae266526a9b972ff3ef173238d16b8937e3c159d05399a68c04043eb`
+- `rtl/tb/fp32_unary_main.cpp`: `9a2a469b15b9f32e41f44d407afa0a6cb4a8c298f57b38542484f70164a8b320`
 - `rtl/tb/axi_main.cpp`: `db70b36825b38e4f6d4ae38fae218e26610a4d07d3faded0ec18a159a4315d75`
 - `rtl/tb/axi_write_main.cpp`: `0cd7a2afd9fcac86d181c4496b17e1b2378159929e70ff6d24043a8aa57622b3`
+- `rtl/tb/axi_page_main.cpp`: `9c4f574b74da081a2dc954685490aef9b1d105356814cdfc001005820e840853`
 - `rtl/tb/sim_common.h`: `2886d974f5fc65e8b4ebd0ff69a10547c6c56bff7934beed0d5f5e115055b14c`
-- `run_rtl_tests.py`: `fc7838d4fdc1a1b1f237017562dccef601e836ce8b7f257247d829f1234d5691`
+- `run_rtl_tests.py`: `14978dd2fb99864e1cfce9b1b6b35b6e93a76e4dc87c3d4d48eaf04f26a34ae4`
+- `rtl_spu_golden.py`: `afbd84d385d50a240f2d754c53fa79f9e57cb0f650a18ea0af12bb007e2cd7fc`
 - `kv260/axi_plan.py`: `1f448440c6a45b8b525ec0640dd5fac83e0bf340f6edb3f550783c9c291a0bb6`

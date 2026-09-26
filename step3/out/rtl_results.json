@@ -2,7 +2,7 @@
   "status": "PASS",
   "simulator": "/workspace/repos/kv260_fpga/step3/rtl/.tools/verilator/bin/verilator_bin",
   "seed": 12345,
-  "elapsed_s": 196.86,
+  "elapsed_s": 318.09,
   "tests": [
     {
       "module": "w4a16_dot",
@@ -107,6 +107,54 @@
       "lanes": 32,
       "jobs": 9,
       "report": "PASS gemv lanes=32 page=4096 data_w=128 jobs=9 cycles=6096 stalled=46 act_stalled=3002 partial_reset=1"
+    },
+    {
+      "module": "fp32_rsqrt",
+      "n": 76,
+      "report": "PASS fp32_rsqrt n=76 cycles=420 stalled=342"
+    },
+    {
+      "module": "fp32_exp",
+      "n": 91,
+      "report": "PASS fp32_exp n=91 cycles=501 stalled=408"
+    },
+    {
+      "module": "spu_rmsnorm",
+      "jobs": 4,
+      "libm_ulp_cap": 8,
+      "observed_libm_ulp": 0,
+      "report": "PASS spu_rmsnorm jobs=4 cycles=1255 stalled=905"
+    },
+    {
+      "module": "spu_silu_mul",
+      "n": 99,
+      "libm_ulp_cap": 32,
+      "observed_libm_ulp": 2,
+      "report": "PASS spu_silu_mul n=99 cycles=534 stalled=433"
+    },
+    {
+      "module": "gemv_tile",
+      "page_bytes": 8192,
+      "data_w": 512,
+      "lanes": 32,
+      "rows": 2,
+      "jobs": 4,
+      "report": "PASS gemv_tile rows=2 lanes=32 page=8192 data_w=512 jobs=4 cycles=1533 stalled=42"
+    },
+    {
+      "module": "gemv_tile",
+      "page_bytes": 8192,
+      "data_w": 512,
+      "lanes": 32,
+      "rows": 4,
+      "jobs": 4,
+      "report": "PASS gemv_tile rows=4 lanes=32 page=8192 data_w=512 jobs=4 cycles=1596 stalled=36"
+    },
+    {
+      "module": "axi_page_bridge",
+      "data_w": 128,
+      "jobs": 3,
+      "report": "PASS axi_page_bridge jobs=3 data_w=128 cycles=7300"
     },
     {
       "module": "axi_read_master",

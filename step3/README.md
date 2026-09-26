@@ -2,7 +2,7 @@
 
 目标：VPU / SPU / MMU + DDR 权重分页，batch=1、1024上下文持续解码8–10 tokens/s。
 
-**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。SPU/DCU RTL、AXI写通道与多口重排、KV硬件调度、PS/PL集成和驱动仍需实现；没有bitstream、完整真实checkpoint质量结果或板测速度。
+**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。完整 SPU/DCU 调度、多口重排、KV硬件调度、PS/PL集成和驱动仍需实现；AXI 读写主机与仿真用页桥、SPU 数值叶和多行 GEMV 已在 Verilator 下对拍。没有bitstream、完整真实checkpoint质量结果或板测速度。
 
 实施规格见 [KV260 v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md)。P3 v0.1及旧P3性能报告保留作历史分析，不能用作KV260部署配置。新平台预算见 [KV260报告](out/kv260_report.md)。
 
@@ -62,9 +62,12 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 | `rtl/page_demux.sv` | W4/g128 S/W页分流、尾页padding剔除、ready/valid反压 | AXI主机、乱序重排、scale缓存、W8模式 |
 | `rtl/w4a16_dot.sv` | 128元素组内精确整数点积，LANES可配置 | BFP量化、完整矩阵调度 |
 | `rtl/scale_accum.sv` | INT32组积 × FP16 scale × 2^e，再按组做FP32累加 | BFP量化器、多行调度、200 MHz流水 |
-| `rtl/gemv_row.sv` | 单行：`page_demux`→scale FIFO→`w4a16_dot`→`scale_accum`，对拍`VPU.gemv` | 多行调度、DDR控制器、SPU |
+| `rtl/gemv_row.sv` | 单行：`page_demux`→scale FIFO→`w4a16_dot`→`scale_accum`，对拍`VPU.gemv` | 层调度、DDR控制器 |
 | `rtl/axi_read_master.sv` | 按4 KiB/MAX_BEATS拆分的outstanding=1 AXI4读 | 多口重排、驱动、地址转换 |
 | `rtl/axi_write_master.sv` | 同一拆分契约的 outstanding=1 AXI4写 | 多口重排、驱动、地址转换 |
+| `rtl/gemv_tile.sv` | R 交错多行：共享 demux + ROWS 累加，对拍 `VPU.gemv` | 层调度、DCU、DDR |
+| `rtl/fp32_pkg.sv` + `fp32_rsqrt`/`fp32_exp`/`spu_rmsnorm`/`spu_silu_mul` | SPU 数值叶；对 `rtl_spu_golden` 逐位；对 libm 有 ULP 门限 | 完整 SPU 调度、softmax 顶层 |
+| `rtl/axi_page_bridge.sv` | 仿真：AXI 读 → `gemv_row`，可选 AXI 写回结果 | DDR PHY、多 HP、驱动 |
 
 A16表示有符号整数尾数，**不是IEEE FP16**。`scale_accum`的有限结果与`VPU.gemv`的FP32公式逐位一致（0 ULP）；NaN规范为`0x7fc00000`，不要求与主机libm的NaN位型相同。默认32路dot只用于功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。AXI读主机不是HP口驱动，也没有寄存器地址。
 
@@ -75,7 +78,7 @@ python3 run_rtl_tests.py
 
 使用实际Verilator仿真RTL，再与NumPy、现有页打包器和`split_read`比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。Verilator可以装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
 
-完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，`scale_accum`、`gemv_row`，以及AXI读/写数据宽度128/64/32和不同MAX_BEATS。含随机停顿、结果反压、复位、极值与尾页。`--quick`运行默认dot/page、scale累加、单行GEMV和一种AXI读+写配置。SPU的exp/rsqrt仍没有RTL。
+完整测试覆盖LANES 1/8/32/128、页宽组合、`scale_accum`、`gemv_row`、`gemv_tile`、SPU 叶、`axi_page_bridge`，以及AXI读/写多种宽度。含随机停顿、结果反压、复位、极值与尾页。`--quick` 含默认dot/page、scale、单行GEMV、SPU叶、`gemv_tile`(R=2)、`axi_page_bridge`和一种AXI读+写。SPU 对 libm 非逐位一致，见 `rtl/README.md`；完整 SPU/softmax 调度仍无。
 
 安装Vivado的K26器件支持后可运行：
 

@@ -30,12 +30,12 @@
 - 软件样机：分页、对称 RTN、BFP、VPU/SPU/MMU、DCU/ISA、小模型执行和导出校验
 - KV260 端口/存储预算（预测，不是测量）
 - AXI4 读突发拆分的可执行契约（`step3/kv260/axi_plan.py`）
-- 可仿真 RTL：`page_demux`、`w4a16_dot`、`scale_accum`、单行 `gemv_row`、outstanding=1 的 `axi_read_master` / `axi_write_master`
+- 可仿真 RTL：`page_demux`、`w4a16_dot`、`scale_accum`、单行 `gemv_row`、多行 `gemv_tile`、SPU 叶（`fp32_rsqrt`/`fp32_exp`/`spu_rmsnorm`/`spu_silu_mul`）、outstanding=1 的 `axi_read_master` / `axi_write_master`、仿真用 `axi_page_bridge`
 - 只读板卡探测脚本 `board_probe.py`（还没有在 KV260 上跑出的 `board_probe.json`）
 
 ## 还没有
 
-- 完整 SPU / DCU RTL、KV 硬件调度、多 HP 口重排
+- 完整 SPU/DCU 调度与层级 RTL（已有 SPU 数值叶）、KV 硬件调度、多 HP 口重排
 - Linux 驱动、PS/PL 集成、器件约束下的综合与实现
 - 真实 Qwen3-1.7B checkpoint 的精度结果
 - M0 板卡环境、M1 带宽测量，以及 M3–M5
@@ -59,6 +59,6 @@ python3 run_rtl_tests.py --quick
 python3 run_rtl_tests.py
 ```
 
-`--quick` 覆盖默认 dot/page，外加 `scale_accum`、`gemv_row` 和一种 AXI 读/写配置。完整矩阵还包含其余位宽和 burst 上限。没有 Verilator、编译失败或比较失败都会非零退出，不会改成“只跑软件就算 RTL 通过”。本地可用的 CI 草稿在未推送的 `.github/workflows/rtl-sim.yml`（当前 token 缺 `workflow` scope）；内容为 selftest + unittest + `--quick`。
+`--quick` 覆盖默认 dot/page，外加 `scale_accum`、`gemv_row`、SPU 叶、`gemv_tile`(R=2)、`axi_page_bridge` 和一种 AXI 读/写配置。完整矩阵还包含其余位宽、burst 上限与 `gemv_tile`(R=4)。没有 Verilator、编译失败或比较失败都会非零退出，不会改成“只跑软件就算 RTL 通过”。本地可用的 CI 草稿在未推送的 `.github/workflows/rtl-sim.yml`（当前 token 缺 `workflow` scope）；内容为 selftest + unittest + `--quick`。
 
 导出、真实权重接口和每个叶模块的边界见 [step3/README.md](step3/README.md) 与 [step3/rtl/README.md](step3/rtl/README.md)。

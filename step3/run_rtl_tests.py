@@ -639,6 +639,316 @@ def test_axi_write(data_w, max_beats, seed, toolchain):
             "cases": len(cases), "report": report}
 
 
+
+def test_fp32_rsqrt(seed, toolchain):
+    directory, binary, env = build(
+        "fp32_rsqrt", {}, "fp32_unary_main.cpp",
+        {"TB_FP32_RSQRT": "1"}, *toolchain, extra_sv=("fp32_pkg.sv",))
+    from rtl_spu_golden import fp32_rsqrt, f32_bits, bits_f32, CANON_NAN
+    import math
+    rng = np.random.default_rng(seed)
+    xs = [np.float32(v) for v in [1e-20, 1e-10, 1e-5, 0.25, 1.0, 4.0, 100.0, 1e10]]
+    xs += list(rng.uniform(1e-8, 1e8, 64).astype(np.float32))
+    xs += [np.float32(0.0), np.float32(np.inf), np.float32(np.nan), np.float32(-1.0)]
+    expected = []
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(xs)}\n")
+        for x in xs:
+            bits = int(f32_bits(x))
+            out.write(f"{bits:08x}\n")
+            expected.append(int(f32_bits(fp32_rsqrt(x))))
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if actual != expected:
+        for i, (a, e) in enumerate(zip(actual, expected)):
+            if a != e:
+                raise AssertionError(f"fp32_rsqrt[{i}]: rtl {a:08x} expected {e:08x}")
+        raise AssertionError("fp32_rsqrt length mismatch")
+    print(report, flush=True)
+    return {"module": "fp32_rsqrt", "n": len(xs), "report": report}
+
+
+def test_fp32_exp(seed, toolchain):
+    directory, binary, env = build(
+        "fp32_exp", {}, "fp32_unary_main.cpp",
+        {"TB_FP32_EXP": "1"}, *toolchain, extra_sv=("fp32_pkg.sv",))
+    from rtl_spu_golden import fp32_exp, f32_bits
+    rng = np.random.default_rng(seed)
+    xs = [np.float32(v) for v in [-10.0, -1.0, 0.0, 1.0, 2.0, 10.0, 20.0, -20.0]]
+    xs += list(rng.uniform(-15, 15, 80).astype(np.float32))
+    xs += [np.float32(88.5), np.float32(-104.0), np.float32(np.nan)]
+    expected = []
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(xs)}\n")
+        for x in xs:
+            out.write(f"{int(f32_bits(x)):08x}\n")
+            expected.append(int(f32_bits(fp32_exp(x))))
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if actual != expected:
+        for i, (a, e) in enumerate(zip(actual, expected)):
+            if a != e:
+                raise AssertionError(f"fp32_exp[{i}]: rtl {a:08x} expected {e:08x}")
+        raise AssertionError("fp32_exp length mismatch")
+    print(report, flush=True)
+    return {"module": "fp32_exp", "n": len(xs), "report": report}
+
+
+def test_spu_rmsnorm(seed, toolchain):
+    directory, binary, env = build(
+        "spu_rmsnorm", {"MAX_N": 256}, "spu_rmsnorm_main.cpp",
+        {}, *toolchain, extra_sv=("fp32_pkg.sv",))
+    from rtl_spu_golden import spu_rmsnorm_rtl, f32_bits
+    from accel_golden import spu_rmsnorm
+    rng = np.random.default_rng(seed)
+    jobs = []
+    for n in (1, 4, 16, 128):
+        x = rng.normal(0, 1, n).astype(np.float32)
+        w = rng.normal(0, 1, n).astype(np.float32)
+        eps = np.float32(1e-6)
+        jobs.append((n, eps, x, w, spu_rmsnorm_rtl(x, w, eps)))
+    # Document libm budget on one job (not a pass/fail gate for RTL bits)
+    ref = spu_rmsnorm(jobs[-1][2], jobs[-1][3], jobs[-1][1])
+    from rtl_spu_golden import ulp_distance
+    max_ulp = max(ulp_distance(a, b) for a, b in zip(jobs[-1][4], ref))
+    if max_ulp > 8:
+        raise AssertionError(f"rmsnorm golden drifted from NumPy path: max_ulp={max_ulp}")
+
+    expected = []
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for n, eps, x, w, y in jobs:
+            out.write(f"{n} {int(f32_bits(eps)):08x}\n")
+            for v in x:
+                out.write(f"{int(f32_bits(v)):08x} ")
+            out.write("\n")
+            for v in w:
+                out.write(f"{int(f32_bits(v)):08x} ")
+            out.write("\n")
+            expected.extend(int(f32_bits(v)) for v in y)
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if actual != expected:
+        for i, (a, e) in enumerate(zip(actual, expected)):
+            if a != e:
+                raise AssertionError(f"spu_rmsnorm[{i}]: rtl {a:08x} expected {e:08x}")
+        raise AssertionError("spu_rmsnorm length mismatch")
+    print(report, flush=True)
+    return {"module": "spu_rmsnorm", "jobs": len(jobs), "libm_ulp_cap": 8,
+            "observed_libm_ulp": max_ulp, "report": report}
+
+
+def test_spu_silu(seed, toolchain):
+    directory, binary, env = build(
+        "spu_silu_mul", {}, "spu_silu_main.cpp",
+        {}, *toolchain, extra_sv=("fp32_pkg.sv",))
+    from rtl_spu_golden import spu_silu_mul_rtl, f32_bits, ulp_distance
+    from accel_golden import spu_silu_mul
+    rng = np.random.default_rng(seed)
+    gs = list(rng.normal(0, 3, 96).astype(np.float32)) + [np.float32(0), np.float32(5), np.float32(-5)]
+    us = list(rng.normal(0, 2, len(gs)).astype(np.float32))
+    expected = []
+    max_ulp = 0
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(gs)}\n")
+        for g, u in zip(gs, us):
+            out.write(f"{int(f32_bits(g)):08x} {int(f32_bits(u)):08x}\n")
+            y = spu_silu_mul_rtl(g, u)
+            expected.append(int(f32_bits(y)))
+            max_ulp = max(max_ulp, ulp_distance(y, spu_silu_mul(g, u)))
+    if max_ulp > 32:
+        raise AssertionError(f"silu golden drifted from NumPy path: max_ulp={max_ulp}")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if actual != expected:
+        for i, (a, e) in enumerate(zip(actual, expected)):
+            if a != e:
+                raise AssertionError(f"spu_silu[{i}]: rtl {a:08x} expected {e:08x}")
+        raise AssertionError("spu_silu length mismatch")
+    print(report, flush=True)
+    return {"module": "spu_silu_mul", "n": len(gs), "libm_ulp_cap": 32,
+            "observed_libm_ulp": max_ulp, "report": report}
+
+
+def test_gemv_tile(page, width, lanes, rows, seed, toolchain):
+    directory, binary, env = build(
+        "gemv_tile",
+        {"PAGE_BYTES": page, "DATA_W": width, "LANES": lanes, "ROWS": rows},
+        "gemv_tile_main.cpp",
+        {"GEMV_TILE_LANES": lanes, "GEMV_TILE_PAGE_BYTES": page,
+         "GEMV_TILE_DATA_W": width, "GEMV_TILE_ROWS": rows},
+        *toolchain,
+        extra_sv=("page_demux.sv", "w4a16_dot.sv", "scale_accum.sv"),
+    )
+    rng = np.random.default_rng(seed)
+    from accel_golden import AccelCfg, Decoded, VPU, bfp_quant
+
+    jobs = []
+    for groups in (1, 2, 3, min(7, page // 64)):
+        cols = groups * 128
+        q = rng.integers(0, 16, (rows, cols), dtype=np.uint8)
+        scales = rng.integers(1, 0x7800, (rows, groups), dtype=np.uint16)
+        activation = (rng.normal(size=(cols,)).astype(np.float32) * 0.05)
+        activation[0] = np.float32(1.0)
+        layout = StreamLayout(rows, cols, bits=4, group=128, page=page, R=rows)
+        image = pack_stream(q, scales.view(np.float16), layout)
+        for block in range(layout.n_blocks):
+            start = block * (1 + layout.wpb) * page
+            block_n = min(layout.spp, layout.n_groups - block * layout.spp)
+            image[start + block_n * 2: start + page] = 0xED
+            end = start + page + ((block_n * 64 + page - 1) // page) * page
+            image[start + page + block_n * 64: end] = 0xAB
+        mantissa, exponent = bfp_quant(activation, 16, 128)
+        weights = Decoded(q, scales.view(np.float16), 4, 128)
+        golden = VPU(AccelCfg()).gemv(weights, activation)
+        expect_bits = [int(np.asarray(golden[r], dtype=np.float32).view(np.uint32)) for r in range(rows)]
+        beat_bytes = width // 8
+        raw = image.tobytes()
+        stream = [raw[i:i + beat_bytes][::-1].hex() for i in range(0, len(raw), beat_bytes)]
+        act_beats = []
+        flat_m = mantissa.astype(np.int16).reshape(-1)
+        for start in range(0, flat_m.size, lanes):
+            act_beats.append(packed_hex(flat_m[start:start + lanes], 16))
+        jobs.append({
+            "groups": groups, "stream": stream, "act_beats": act_beats,
+            "exps": [int(v) for v in exponent.tolist()],
+            "expected": expect_bits,
+        })
+
+    vectors = directory / "vectors.txt"
+    expected = []
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for job in jobs:
+            out.write(f"{job['groups']} {len(job['stream'])} {len(job['act_beats'])}\n")
+            for beat in job["stream"]:
+                out.write(beat + "\n")
+            for beat in job["act_beats"]:
+                out.write(beat + "\n")
+            for exp in job["exps"]:
+                out.write(f"{exp}\n")
+            expected.append(job["expected"])
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    lines = [ln.strip() for ln in results.read_text().splitlines() if ln.strip()]
+    if len(lines) != len(expected):
+        raise AssertionError(f"gemv_tile result count {len(lines)} != {len(expected)}")
+    for index, (line, want_rows) in enumerate(zip(lines, expected)):
+        # hex_string dumps high row first for wide vector
+        hex_all = line
+        chars = rows * 8
+        if len(hex_all) < chars:
+            hex_all = hex_all.zfill(chars)
+        got_rows = []
+        for r in range(rows):
+            # high word first: row ROWS-1 at start
+            chunk = hex_all[r * 8:(r + 1) * 8]
+            got_rows.append(int(chunk, 16))
+        got_rows = list(reversed(got_rows))  # now low row first
+        if got_rows != want_rows:
+            raise AssertionError(
+                f"gemv_tile job {index}: rtl {[f'{v:08x}' for v in got_rows]} "
+                f"expected {[f'{v:08x}' for v in want_rows]}")
+    print(report, flush=True)
+    return {"module": "gemv_tile", "page_bytes": page, "data_w": width,
+            "lanes": lanes, "rows": rows, "jobs": len(jobs), "report": report}
+
+
+def test_axi_page(seed, toolchain):
+    page, width, lanes = 8192, 128, 32
+    directory, binary, env = build(
+        "axi_page_bridge",
+        {"ADDR_W": 49, "DATA_W": width, "MAX_BEATS": 256,
+         "PAGE_BYTES": page, "LANES": lanes},
+        "axi_page_main.cpp",
+        {"DATA_W": width, "LANES": lanes},
+        *toolchain,
+        extra_sv=("axi_read_master.sv", "axi_write_master.sv", "gemv_row.sv",
+                  "page_demux.sv", "w4a16_dot.sv", "scale_accum.sv"),
+    )
+    rng = np.random.default_rng(seed)
+    from accel_golden import AccelCfg, Decoded, VPU, bfp_quant
+
+    jobs = []
+    for groups, do_write in ((1, 0), (2, 1), (3, 1)):
+        cols = groups * 128
+        q = rng.integers(0, 16, (1, cols), dtype=np.uint8)
+        scales = rng.integers(1, 0x7800, (1, groups), dtype=np.uint16)
+        activation = (rng.normal(size=(cols,)).astype(np.float32) * 0.05)
+        activation[0] = np.float32(1.0)
+        layout = StreamLayout(1, cols, bits=4, group=128, page=page, R=1)
+        image = pack_stream(q, scales.view(np.float16), layout)
+        for block in range(layout.n_blocks):
+            start = block * (1 + layout.wpb) * page
+            block_n = min(layout.spp, layout.n_groups - block * layout.spp)
+            image[start + block_n * 2: start + page] = 0xED
+            end = start + page + ((block_n * 64 + page - 1) // page) * page
+            image[start + page + block_n * 64: end] = 0xAB
+        mantissa, exponent = bfp_quant(activation, 16, 128)
+        weights = Decoded(q, scales.view(np.float16), 4, 128)
+        golden = VPU(AccelCfg()).gemv(weights, activation)
+        expect = int(np.asarray(golden[0], dtype=np.float32).view(np.uint32))
+        addr = 0x1000
+        result_addr = 0x8000
+        raw = bytearray(image.tobytes())
+        # Extend mem so result_addr is inside the same image buffer for write checks
+        need = result_addr + width // 8 - addr
+        if len(raw) < need:
+            raw.extend(b"\x00" * (need - len(raw)))
+        act_beats = []
+        flat_m = mantissa.astype(np.int16).reshape(-1)
+        for start in range(0, flat_m.size, lanes):
+            act_beats.append(packed_hex(flat_m[start:start + lanes], 16))
+        jobs.append({
+            "addr": addr, "bytes": len(image.tobytes()), "groups": groups,
+            "result_addr": result_addr, "do_write": do_write,
+            "act_beats": act_beats,
+            "exps": [int(v) for v in exponent.tolist()],
+            "mem": raw, "expected": expect,
+        })
+
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for job in jobs:
+            out.write(f"{job['addr']:x} {job['bytes']} {job['groups']} "
+                      f"{job['result_addr']:x} {job['do_write']} "
+                      f"{len(job['act_beats'])} {len(job['mem'])}\n")
+            for beat in job["act_beats"]:
+                out.write(beat + "\n")
+            for exp in job["exps"]:
+                out.write(f"{exp}\n")
+            for b in job["mem"]:
+                out.write(f"{b:02x} ")
+            out.write("\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    lines = [ln.split() for ln in results.read_text().splitlines() if ln.strip()]
+    if len(lines) != len(jobs):
+        raise AssertionError(f"axi_page cases {len(lines)} != {len(jobs)}")
+    for job, parts in zip(jobs, lines):
+        got = int(parts[0], 16)
+        resp = int(parts[1], 16)
+        if got != job["expected"] or resp != 0:
+            raise AssertionError(
+                f"axi_page rtl {got:08x} resp {resp} expected {job['expected']:08x}")
+        if job["do_write"]:
+            written = int(parts[2], 16)
+            if written != job["expected"]:
+                raise AssertionError(
+                    f"axi_page writeback {written:08x} != {job['expected']:08x}")
+    print(report, flush=True)
+    return {"module": "axi_page_bridge", "data_w": width, "jobs": len(jobs), "report": report}
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -664,8 +974,21 @@ def write_rtl_report(summary):
         elif module == "gemv_row":
             config = (f"PAGE={test['page_bytes']}, DATA_W={test['data_w']}, "
                       f"LANES={test['lanes']}, jobs={test['jobs']}")
-        else:
+        elif module == "gemv_tile":
+            config = (f"ROWS={test['rows']}, PAGE={test['page_bytes']}, "
+                      f"DATA_W={test['data_w']}, LANES={test['lanes']}, jobs={test['jobs']}")
+        elif module in ("fp32_rsqrt", "fp32_exp"):
+            config = f"n={test['n']}"
+        elif module == "spu_rmsnorm":
+            config = f"jobs={test['jobs']}, libm_ulp<={test['libm_ulp_cap']} (obs {test['observed_libm_ulp']})"
+        elif module == "spu_silu_mul":
+            config = f"n={test['n']}, libm_ulp<={test['libm_ulp_cap']} (obs {test['observed_libm_ulp']})"
+        elif module == "axi_page_bridge":
+            config = f"DATA_W={test['data_w']}, jobs={test['jobs']}"
+        elif "max_beats" in test:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
+        else:
+            config = str({k: v for k, v in test.items() if k not in ("module", "report")})
         lines.append(f"| {module} | {config} | {test['report']} |")
     lines.extend([
         "",
@@ -679,6 +1002,12 @@ def write_rtl_report(summary):
         "",
         "axi_write_master uses the same split via `split_write` (identical rules). Outstanding 1: AW, W beats, then B before the next AW. Full WSTRB on aligned beats. A nonzero BRESP stops further AW. Not a driver and not a board measurement.",
         "",
+        "SPU leaves (`fp32_rsqrt`, `fp32_exp`, `spu_rmsnorm`, `spu_silu_mul`) are bit-exact against `rtl_spu_golden.py` (same seeds/NR/Taylor as `fp32_pkg.sv`). They are NOT bit-exact against host libm; see rtl/README.md for ULP/relative budgets vs `accel_golden`.",
+        "",
+        "gemv_tile runs an R-interleaved `pack_stream` (R=ROWS) through one demux into ROWS `scale_accum` lanes with shared/replayed activations. Still not a full layer/DCU.",
+        "",
+        "axi_page_bridge is sim-only: `axi_read_master` loads pack_stream bytes into `gemv_row`, optional `axi_write_master` stores the FP32 result. No DDR PHY or multi-HP reorder.",
+        "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
         "Reproduce from step3: `python3 run_rtl_tests.py`.",
@@ -688,10 +1017,14 @@ def write_rtl_report(summary):
     ])
     for rel in (
         "rtl/w4a16_dot.sv", "rtl/page_demux.sv", "rtl/scale_accum.sv", "rtl/gemv_row.sv",
+        "rtl/gemv_tile.sv", "rtl/fp32_pkg.sv", "rtl/fp32_rsqrt.sv", "rtl/fp32_exp.sv",
+        "rtl/spu_rmsnorm.sv", "rtl/spu_silu_mul.sv", "rtl/axi_page_bridge.sv",
         "rtl/axi_read_master.sv", "rtl/axi_write_master.sv",
         "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
-        "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp", "rtl/tb/sim_common.h",
-        "run_rtl_tests.py", "kv260/axi_plan.py",
+        "rtl/tb/gemv_tile_main.cpp", "rtl/tb/spu_rmsnorm_main.cpp", "rtl/tb/spu_silu_main.cpp",
+        "rtl/tb/fp32_unary_main.cpp", "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp",
+        "rtl/tb/axi_page_main.cpp", "rtl/tb/sim_common.h",
+        "run_rtl_tests.py", "rtl_spu_golden.py", "kv260/axi_plan.py",
     ):
         digest = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
         lines.append(f"- `{rel}`: `{digest}`")
@@ -701,7 +1034,7 @@ def write_rtl_report(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="default dot/page, scale_accum, gemv_row, and one AXI read+write master")
+    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + one AXI rw")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -718,6 +1051,14 @@ def main():
     gemv_cfgs = [(8192, 512, 32)] if args.quick else [(8192, 512, 32), (8192, 512, 128), (4096, 128, 32)]
     reports += [test_gemv(page, width, lanes, args.seed, toolchain)
                 for page, width, lanes in gemv_cfgs]
+    reports.append(test_fp32_rsqrt(args.seed, toolchain))
+    reports.append(test_fp32_exp(args.seed, toolchain))
+    reports.append(test_spu_rmsnorm(args.seed, toolchain))
+    reports.append(test_spu_silu(args.seed, toolchain))
+    tile_cfgs = [(8192, 512, 32, 2)] if args.quick else [(8192, 512, 32, 2), (8192, 512, 32, 4)]
+    reports += [test_gemv_tile(page, width, lanes, rows, args.seed, toolchain)
+                for page, width, lanes, rows in tile_cfgs]
+    reports.append(test_axi_page(args.seed, toolchain))
     axi_cfgs = [(128, 256)] if args.quick else [(128, 256), (128, 16), (64, 256), (32, 16)]
     reports += [test_axi(width, beats, args.seed, toolchain) for width, beats in axi_cfgs]
     axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
