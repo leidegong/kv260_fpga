@@ -49,7 +49,7 @@ ACC_REGS = [
     Reg("ID", 0x00, "RO", "0x4B564143 ('KVAC')"),
     Reg("VERSION", 0x04, "RO", "major<<16 | minor"),
     Reg("CTRL", 0x08, "WO", "bit0 START (run program once), bit31 SOFT_RESET"),
-    Reg("STATUS", 0x0C, "RO", "bit0 BUSY, bit1 DONE (sticky until START), [15:8] ERROR code"),
+    Reg("STATUS", 0x0C, "RO", "bit0 BUSY, bit1 DONE (sticky until START), [15:8] ERROR code (rtl/accel_core.sv)"),
     Reg("IMAGE_BASE_LO", 0x10, "RW", "DMA device address of the DDR image [31:0] (64 B aligned)"),
     Reg("IMAGE_BASE_HI", 0x14, "RW", "DMA device address of the DDR image [48:32]"),
     Reg("PROG_WORDS", 0x18, "RW", "number of 128-bit instructions in program memory"),
@@ -58,8 +58,12 @@ ACC_REGS = [
     Reg("RESULT", 0x24, "RO", "argmax token of the last run"),
     Reg("CYCLES", 0x28, "RO", "clock cycles of the last run"),
     Reg("ERR_PC", 0x2C, "RO", "instruction index that raised ERROR"),
-    Reg("PROG_ADDR", 0x30, "RW", "program memory word pointer for PROG_DATA writes"),
+    Reg("PROG_ADDR", 0x30, "RW", "program memory pointer in 32-bit units (instruction = PROG_ADDR / 4)"),
     Reg("PROG_DATA", 0x34, "WO", "writes 32 bits at PROG_ADDR (4 writes per instruction, low first), auto-increment"),
+    Reg("ROPE_ADDR", 0x38, "RW", "RoPE table pointer: 0..63 cos, 64..127 sin of the current POS"),
+    Reg("ROPE_DATA", 0x3C, "WO", "writes one FP32 RoPE value at ROPE_ADDR, auto-increment"),
+    Reg("ATTN_SCALE", 0x40, "RW", "FP32 bits of head_dim ** -0.5 (0x3DB504F3 for 128)"),
+    Reg("CAPS", 0x44, "RO", "[3:0] HP ports, [31:16] max context rows"),
 ]
 
 

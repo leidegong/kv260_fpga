@@ -333,6 +333,43 @@ package fp32_pkg;
         return fmul(o, pow2(n2));
     endfunction
 
+    // Block floating point (accel_golden.bfp_quant) for qmax = 2^(bits-1) - 1:
+    // smallest e with max|x| / 2^e <= qmax (0 for an all-zero group), where a is
+    // the magnitude bits of max|x|. With max|x| = Mn * 2^(En-23), Mn in [2^23, 2^24),
+    // e = En - (bits-2) if Mn <= qmax * 2^(25-bits), else En - (bits-3).
+    function automatic logic signed [15:0] bfp_exponent(input logic [30:0] a, input int bits);
+        logic [31:0] lim;
+        if (a == 0) return 16'sd0;
+        lim = ((32'd1 << (bits - 1)) - 32'd1) << (25 - bits);
+        return ({8'd0, norm_mant({1'b0, a})} <= lim) ? norm_exp({1'b0, a}) - 16'(bits - 2)
+                                                     : norm_exp({1'b0, a}) - 16'(bits - 3);
+    endfunction
+    // round_half_even(x / 2^e) clipped to +-qmax, computed exactly on the integer mantissa.
+    function automatic logic signed [31:0] bfp_mantissa(input logic [31:0] x, input logic signed [15:0] e,
+                                                        input int bits);
+        logic [23:0] m;
+        logic signed [15:0] sh;
+        logic [47:0] q;
+        logic [31:0] mag, lim;
+        logic guard, sticky;
+        lim = (32'd1 << (bits - 1)) - 32'd1;
+        m = mant(x);
+        sh = e - uexp(x) + 16'sd23;                        // x / 2^e = m * 2^-sh
+        if (sh <= 0) begin
+            q = (sh < -16'sd24) ? 48'hffff_ffff_ffff : {24'd0, m} << (-sh);
+            mag = (q > 48'(lim)) ? lim : 32'(q);
+        end else if (sh > 16'sd24) begin
+            mag = '0;
+        end else begin
+            q = {24'd0, m} >> sh;
+            guard = m[5'(sh - 16'sd1)];
+            sticky = (sh > 16'sd1) && ((m & ~(24'hffffff << (sh - 16'sd1))) != 0);
+            mag = 32'(q) + {31'd0, guard && (sticky || q[0])};
+            if (mag > lim) mag = lim;
+        end
+        return x[31] ? -$signed(mag) : $signed(mag);
+    endfunction
+
     // Total order key for finite values / infinities; -0 and +0 compare equal.
     function automatic logic signed [32:0] order_key(input logic [31:0] a);
         if (a[30:0] == 0) return 33'sd0;

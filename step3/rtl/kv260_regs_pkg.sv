@@ -24,7 +24,7 @@ package kv260_regs_pkg;
     localparam logic [11:0] ACC_ID = 12'h000;  // RO: 0x4B564143 ('KVAC')
     localparam logic [11:0] ACC_VERSION = 12'h004;  // RO: major<<16 | minor
     localparam logic [11:0] ACC_CTRL = 12'h008;  // WO: bit0 START (run program once), bit31 SOFT_RESET
-    localparam logic [11:0] ACC_STATUS = 12'h00C;  // RO: bit0 BUSY, bit1 DONE (sticky until START), [15:8] ERROR code
+    localparam logic [11:0] ACC_STATUS = 12'h00C;  // RO: bit0 BUSY, bit1 DONE (sticky until START), [15:8] ERROR code (rtl/accel_core.sv)
     localparam logic [11:0] ACC_IMAGE_BASE_LO = 12'h010;  // RW: DMA device address of the DDR image [31:0] (64 B aligned)
     localparam logic [11:0] ACC_IMAGE_BASE_HI = 12'h014;  // RW: DMA device address of the DDR image [48:32]
     localparam logic [11:0] ACC_PROG_WORDS = 12'h018;  // RW: number of 128-bit instructions in program memory
@@ -33,7 +33,11 @@ package kv260_regs_pkg;
     localparam logic [11:0] ACC_RESULT = 12'h024;  // RO: argmax token of the last run
     localparam logic [11:0] ACC_CYCLES = 12'h028;  // RO: clock cycles of the last run
     localparam logic [11:0] ACC_ERR_PC = 12'h02C;  // RO: instruction index that raised ERROR
-    localparam logic [11:0] ACC_PROG_ADDR = 12'h030;  // RW: program memory word pointer for PROG_DATA writes
+    localparam logic [11:0] ACC_PROG_ADDR = 12'h030;  // RW: program memory pointer in 32-bit units (instruction = PROG_ADDR / 4)
     localparam logic [11:0] ACC_PROG_DATA = 12'h034;  // WO: writes 32 bits at PROG_ADDR (4 writes per instruction, low first), auto-increment
+    localparam logic [11:0] ACC_ROPE_ADDR = 12'h038;  // RW: RoPE table pointer: 0..63 cos, 64..127 sin of the current POS
+    localparam logic [11:0] ACC_ROPE_DATA = 12'h03C;  // WO: writes one FP32 RoPE value at ROPE_ADDR, auto-increment
+    localparam logic [11:0] ACC_ATTN_SCALE = 12'h040;  // RW: FP32 bits of head_dim ** -0.5 (0x3DB504F3 for 128)
+    localparam logic [11:0] ACC_CAPS = 12'h044;  // RO: [3:0] HP ports, [31:16] max context rows
 endpackage
 /* verilator lint_on UNUSEDPARAM */

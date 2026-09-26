@@ -394,6 +394,58 @@ def test_bw(ports, seed, toolchain):
     return {"module": "bw_test_top", "ports": ports, "report": report}
 
 
+ACCEL_SOURCES = ["kv260_regs_pkg.sv", "fp32_pkg.sv", "axil_slave.sv", "axi_rd_mport.sv", "axi_wr_stream.sv",
+                 "bfp_quant.sv", "w4a16_dot.sv", "page_demux.sv", "gemv_core.sv", "accel_core.sv", "accel_top.sv"]
+
+
+def test_accel(ports, seed, toolchain, tokens=(1, 17, 42, 999, 0)):
+    """Full decode tokens through accel_top vs the software DCU (numerics v0.2), bit-exact."""
+    from accel_golden import AccelCfg
+    from dcu import DCU
+    from ddr_pager import QuantCfg, build_image
+    from isa import compile_decode, to_bytes
+    from model_cfg import TINY
+    from ref_qwen3 import random_weights, rope_tables_raw
+    directory, binary, env = build("accel_top", {"NPORTS": ports, "SCRATCH_WORDS": 8192, "PROG_WORDS": 256,
+                                                 "MAX_CTX": 16, "TIMEOUT": 100000},
+                                   "accel_main.cpp", {"ACC_NPORTS": ports}, *toolchain,
+                                   sources=[RTL / name for name in ACCEL_SOURCES])
+    cfg = TINY
+    img = build_image(cfg, random_weights(cfg, seed=seed % 1000), QuantCfg(page=8192, ctx_max=16))
+    before = img.buf.copy()
+    program = to_bytes(compile_decode(img)[0])
+    steps = [(t, pos) for pos, t in enumerate(tokens)]
+    cos, sin = rope_tables_raw(cfg.head_dim, cfg.rope_theta, 16)
+    rope = np.concatenate([np.concatenate([cos[pos, :64], sin[pos, :64]]) for _, pos in steps]).astype(np.float32)
+    (directory / "image.bin").write_bytes(before.tobytes())
+    (directory / "program.bin").write_bytes(program)
+    (directory / "steps.txt").write_text(f"{len(steps)}\n" + "".join(f"{t} {p}\n" for t, p in steps))
+    (directory / "rope.bin").write_bytes(rope.tobytes())
+    base = 0x40000
+    report = run([binary, directory / "image.bin", directory / "program.bin", directory / "steps.txt",
+                  directory / "rope.bin", hex(base), directory, seed], directory, env, "simulate")
+    # Software DCU on an identical copy of the image.
+    dcu = DCU(img, program, AccelCfg())
+    rows = [line.split() for line in (directory / "results.txt").read_text().splitlines()]
+    for (tok, pos), row in zip(steps, rows):
+        logits, argmax = dcu.step(tok, pos)
+        got = np.array([int(v, 16) for v in row[5:]], np.uint32)
+        want = rg.f32_bits(logits)
+        assert int(row[4]) == cfg.vocab and got.size == want.size, f"logit count {row[4]}"
+        bad = np.flatnonzero(got != want)
+        assert not bad.size, f"token {tok} pos {pos}: {bad.size} logits differ, first {bad[0]}: {got[bad[0]]:08x} vs {want[bad[0]]:08x}"
+        assert int(row[2]) == argmax, f"argmax {row[2]} vs {argmax}"
+    after = np.frombuffer((directory / "image_after.bin").read_bytes(), np.uint8)
+    diff = np.flatnonzero(after != img.buf)
+    assert not diff.size, f"DDR image differs from software DCU at {diff.size} bytes, first offset {diff[0]:#x}"
+    changed = int(np.count_nonzero(img.buf != before))
+    assert changed > 0, "KV cache was not written"
+    cycles = [int(r[3]) for r in rows]
+    report = f"PASS accel ports={ports} tokens={len(steps)} logits+argmax+DDR image bit-exact kv_bytes_changed={changed} cycles/token={cycles}"
+    print(report, flush=True)
+    return {"module": "accel_top", "ports": ports, "tokens": list(tokens), "report": report}
+
+
 def plan(quick):
     """(name, callable(seed, toolchain)) for every RTL configuration."""
     jobs = [("fp32", lambda seed, tc: test_fp32(seed, tc))]
@@ -408,6 +460,7 @@ def plan(quick):
              for n, w, k in ([(4, 128, 4)] if quick else [(4, 128, 4), (4, 128, 1), (2, 64, 2), (3, 32, 1), (1, 128, 1)])]
     jobs += [(f"axi_wr{w}", lambda seed, tc, w=w: test_axi_wr(w, seed, tc)) for w in ([128] if quick else [32, 64, 128])]
     jobs += [(f"bw{n}", lambda seed, tc, n=n: test_bw(n, seed, tc)) for n in ([4] if quick else [1, 2, 4])]
+    jobs += [(f"accel{n}", lambda seed, tc, n=n: test_accel(n, seed, tc)) for n in ([4] if quick else [4, 1])]
     return jobs
 
 
