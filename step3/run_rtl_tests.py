@@ -291,6 +291,50 @@ def test_bfp(lanes, seed, toolchain, n_groups=160):
     return {"module": "bfp_quant", "lanes": lanes, "groups": n_groups, "report": report}
 
 
+def test_gemv(width, seed, toolchain, shapes=((37, 256), (2100, 256), (5, 768), (130, 6144), (1, 128))):
+    from ddr_pager import quantize_sym
+    page = 8192
+    directory, binary, env = build("gemv_core", {"DATA_W": width}, "gemv_main.cpp", {"GEMV_DATA_W": width},
+                                    *toolchain, sources=[RTL / "fp32_pkg.sv", RTL / "bfp_quant.sv", RTL / "w4a16_dot.sv",
+                                                         RTL / "page_demux.sv", RTL / "gemv_core.sv"])
+    rng = np.random.default_rng(seed)
+    lanes, beat_bytes = width // 4, width // 8
+    jobs, expected = [], []
+    for rows, cols in shapes:
+        w = rg.weight_matrix(rows, cols, rng)
+        q, scale = quantize_sym(w, 4, 128)
+        x = rg.activation_groups(cols // 128, rng).reshape(-1)
+        stream = pack_stream(q, scale, StreamLayout(rows, cols, 4, 128, page, 1))
+        jobs.append((rows, cols // 128, rg.f32_bits(x).reshape(-1, lanes), stream))
+        expected.append(rg.gemv_expected(q, scale, x))
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for rows, groups, act, stream in jobs:
+            out.write(f"{rows} {groups} {len(act)} {len(stream) // beat_bytes}\n")
+            for beat in act:
+                out.write(packed_hex(beat, 32) + "\n")
+            for start in range(0, len(stream), beat_bytes):
+                out.write(stream[start:start + beat_bytes][::-1].tobytes().hex() + "\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    got = [[] for _ in jobs]
+    lasts = [[] for _ in jobs]
+    for line in results.read_text().splitlines():
+        job, value, last = line.split()
+        got[int(job)].append(int(value, 16))
+        lasts[int(job)].append(int(last))
+    for k, want in enumerate(expected):
+        have = np.array(got[k], np.uint32)
+        assert have.size == want.size, f"gemv job {k}: {have.size} rows, want {want.size}"
+        bad = np.flatnonzero(have != want)
+        assert not bad.size, (f"gemv job {k} shape={shapes[k]}: {bad.size} mismatches, first row {bad[0]} "
+                              f"got {have[bad[0]]:08x} want {want[bad[0]]:08x}")
+        assert lasts[k] == [0] * (want.size - 1) + [1], f"gemv job {k}: y_last misplaced"
+    print(report, flush=True)
+    return {"module": "gemv_core", "data_w": width, "shapes": [list(x) for x in shapes], "report": report}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="only default LANES=32/page8192 width512")

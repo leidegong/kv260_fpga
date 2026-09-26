@@ -89,3 +89,20 @@ def activation_groups(n_groups, rng):
             x = rng.standard_normal(128) * 10.0 ** rng.uniform(-40, -36)
         out.append(np.asarray(x, np.float32))
     return np.stack(out)
+
+
+def weight_matrix(rows, cols, rng):
+    """Float32 weights with varied row magnitudes: zero rows, FP16-subnormal scales, large rows."""
+    w = rng.standard_normal((rows, cols)).astype(np.float32) * np.float32(0.05)
+    w *= (10.0 ** rng.uniform(-2, 2, (rows, 1))).astype(np.float32)
+    if rows > 3:
+        w[1] = 0
+        w[2] *= np.float32(1e-7)                     # scale underflows to an FP16 subnormal
+        w[3] *= np.float32(1e4)
+    return w
+
+
+def gemv_expected(q, scale, x):
+    from accel_golden import VPU, AccelCfg, Decoded
+    with np.errstate(over="ignore", invalid="ignore"):
+        return canonical(f32_bits(VPU(AccelCfg()).gemv(Decoded(q, scale, 4, 128), x)))
