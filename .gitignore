@@ -9,3 +9,15 @@ step3/bundles/
 *.vcd
 *.jou
 *.log
+
+# Out-of-tree driver build products
+drivers/kv260_accel/*.o
+drivers/kv260_accel/*.ko
+drivers/kv260_accel/*.mod
+drivers/kv260_accel/*.mod.c
+drivers/kv260_accel/.*.cmd
+drivers/kv260_accel/modules.order
+drivers/kv260_accel/Module.symvers
+drivers/kv260_accel/.tmp_versions/
+drivers/kv260_accel/userspace/kv260_cli
+drivers/kv260_accel/tests/uapi_layout_check

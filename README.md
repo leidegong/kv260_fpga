@@ -23,6 +23,7 @@
 | `step3/` | 软件样机、导出、预算、RTL 和测试 |
 | `step3/rtl/` | 叶模块 SystemVerilog 与 Verilator 测试台 |
 | `step3/kv260/` | AXI 拆分契约、只读板卡探测脚本、out-of-context 综合脚本（本机未跑） |
+| `drivers/kv260_accel/` | Linux 驱动骨架与 ioctl ABI 草案（未上板验证） |
 | `step3/out/` | 已生成的报告和 4096 上下文 plan。不是板测数据 |
 
 ## 已完成
@@ -32,11 +33,12 @@
 - AXI4 读突发拆分的可执行契约（`step3/kv260/axi_plan.py`）
 - 可仿真 RTL：`page_demux`、`w4a16_dot`、`scale_accum`、单行 `gemv_row`、多行 `gemv_tile`、SPU 叶（`fp32_rsqrt`/`fp32_exp`/`spu_rmsnorm`/`spu_silu_mul`）、outstanding=1 的 `axi_read_master` / `axi_write_master`、仿真用 `axi_page_bridge`
 - 只读板卡探测脚本 `board_probe.py`（还没有在 KV260 上跑出的 `board_probe.json`）
+- Linux 驱动骨架 `drivers/kv260_accel/`（字符设备 + ioctl 草案；无伪造 MMIO；未上板验证）
 
 ## 还没有
 
 - 完整 SPU/DCU 调度与层级 RTL（已有 SPU 数值叶）、KV 硬件调度、多 HP 口重排
-- Linux 驱动、PS/PL 集成、器件约束下的综合与实现
+- 板上可用的驱动/DTS/寄存器表、PS/PL 集成、器件约束下的综合与实现
 - 真实 Qwen3-1.7B checkpoint 的精度结果
 - M0 板卡环境、M1 带宽测量，以及 M3–M5
 
@@ -49,6 +51,12 @@ cd step3
 python3 -m pip install -r requirements.txt
 python3 selftest.py
 python3 -m unittest test_export_kv260 test_axi_plan test_kv260_perf -v
+```
+
+驱动骨架（无板主机自检，不需要 linux-headers）：
+
+```bash
+cd drivers/kv260_accel && make test
 ```
 
 RTL 需要 C++20 编译器。Verilator 装到仓库本地目录，不改系统解释器：

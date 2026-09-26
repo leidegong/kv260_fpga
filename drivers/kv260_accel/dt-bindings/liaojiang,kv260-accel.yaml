@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+# Copyright (c) 2026 KV260 FPGA Qwen3 project
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/liaojiang,kv260-accel.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Liaojiang KV260 Qwen3 PL accelerator (skeleton)
+
+maintainers:
+  - KV260 FPGA Qwen3 project
+
+description: |
+  Draft binding for the out-of-tree kv260_accel driver.
+
+  Register map and interrupt semantics are NOT finalized. The `reg` and
+  `interrupts` properties are optional until a bitstream and PS/PL integration
+  assign real addresses. Do not invent fixed physical MMIO bases in software;
+  place real values only after bitstream + DTS bring-up.
+
+  Compatible string used by the driver: "liaojiang,kv260-accel"
+
+properties:
+  compatible:
+    const: liaojiang,kv260-accel
+
+  reg:
+    description: |
+      AXI-Lite (or similar) control window. Size and base are TBD until the
+      bitstream defines the map. Driver skeleton does not ioremap a fake map.
+    maxItems: 1
+
+  interrupts:
+    description: |
+      Completion / error IRQ from PL. Wiring TBD.
+    maxItems: 1
+
+  interrupt-names:
+    const: done
+
+  clocks:
+    description: Optional PL clock handles; TBD with Vivado BD.
+    maxItems: 2
+
+  clock-names:
+    items:
+      - const: aclk
+      - const: s_axi_aclk
+
+  memory-region:
+    description: |
+      Optional reserved-memory phandle for large weight images. Prefer this or
+      verified SG/segmented DMA over assuming one contiguous 1+ GiB CMA alloc.
+      Selection is TBD after board system image is fixed.
+    maxItems: 1
+
+  dma-coherent:
+    type: boolean
+    description: Hint only; driver still uses DMA API for device addresses.
+
+required:
+  - compatible
+
+additionalProperties: false
+
+examples:
+  - |
+    /* Placeholder node — reg/interrupts omitted until bitstream + DTS. */
+    kv260_accel: accel {
+        compatible = "liaojiang,kv260-accel";
+        /* reg = <... TBD after bitstream ...>; */
+        /* interrupts = <... TBD ...>; */
+        status = "disabled";
+    };

@@ -1,0 +1,2 @@
+# Out-of-tree Kbuild fragment. Invoked via Makefile with KERNELDIR.
+obj-m += kv260_accel.o

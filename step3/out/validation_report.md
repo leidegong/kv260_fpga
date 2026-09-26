@@ -9,6 +9,7 @@
 | Real Qwen3-1.7B weight accuracy | NOT RUN; no real checkpoint downloaded |
 | Vivado synthesis / implementation | NOT RUN; no usable Vivado found |
 | KV260 deployment / performance | NOT RUN; board environment not ready |
+| Linux driver skeleton (`drivers/kv260_accel`) | Host `make test` only; **not** board-validated; no fake MMIO |
 
 Commands executed from `step3` on this host (Linux, CPython 3.13, NumPy 2.2.4, Verilator 5.48.0, g++):
 
@@ -31,3 +32,5 @@ Additions vs prior main:
 Software throughput estimates are not board measurements. No bitstream, utilization, timing, or tok/s hardware claim.
 
 Detailed results: [core software](selftest_report.md), [RTL](rtl_report.md), [budget](kv260_report.md).
+
+Driver skeleton (2026-09-26): added `drivers/kv260_accel/` out-of-tree platform_driver + ioctl ABI draft (DMA coherent buffers, runtime `IMAGE_BASE`, `phys = IMAGE_BASE + (addr<<6)`). Register offsets remain TBD (-1). Host verification: `cd drivers/kv260_accel && make test`. No DTS on this machine → `/dev/kv260_accel` absent by design.
