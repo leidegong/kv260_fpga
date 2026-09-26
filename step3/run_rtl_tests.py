@@ -21,6 +21,7 @@ import time
 import numpy as np
 
 from ddr_pager import StreamLayout, pack_stream
+import rtl_golden as rg
 
 BASE = Path(__file__).resolve().parent
 RTL = BASE / "rtl"
@@ -104,27 +105,28 @@ def compiler_environment():
     raise RuntimeError("MSVC toolchain not found. Set VSCMD_BAT to vcvars64.bat or run from an x64 developer shell.")
 
 
-def build(top, parameters, harness, defines, simulator, root, compiler, env):
+def build(top, parameters, harness, defines, simulator, root, compiler, env, sources=None):
     suffix = "_".join(f"{key}{value}" for key, value in parameters.items())
-    directory = BUILD / f"{top}_{suffix}"
+    directory = BUILD / (f"{top}_{suffix}" if suffix else top)
     directory.mkdir(parents=True, exist_ok=True)
     local_env = env.copy()
     local_env["VERILATOR_ROOT"] = str(root)
     args = [simulator, "--cc", "--no-timing", "--assert", "-Wall", "--top-module", top,
-            "--Mdir", directory, *[f"-G{k}={v}" for k, v in parameters.items()], RTL / f"{top}.sv"]
+            "--Mdir", directory, *[f"-G{k}={v}" for k, v in parameters.items()],
+            *(sources or [RTL / f"{top}.sv"])]
     run(args, directory, local_env, "verilate")
     generated = sorted(directory.glob(f"V{top}*.cpp"))
     includes = [directory, root / "include", root / "include/vltstd", RTL / "tb"]
-    sources = [*generated, RTL / "tb" / harness,
+    cpp_sources = [*generated, RTL / "tb" / harness,
                root / "include/verilated.cpp", root / "include/verilated_threads.cpp"]
     binary = directory / ("sim.exe" if os.name == "nt" else "sim")
     if os.name == "nt":
         command = [compiler, "/nologo", "/std:c++20", "/EHsc", "/O1", "/MD", "/DVL_TIME_CONTEXT",
                    *[f"/I{p}" for p in includes], *[f"/D{k}={v}" for k, v in defines.items()],
-                   *sources, f"/Fe:{binary}"]
+                   *cpp_sources, f"/Fe:{binary}"]
     else:
         command = [compiler, "-std=c++20", "-O1", "-pthread", "-DVL_TIME_CONTEXT", *[f"-I{p}" for p in includes],
-                   *[f"-D{k}={v}" for k, v in defines.items()], *sources, "-o", binary]
+                   *[f"-D{k}={v}" for k, v in defines.items()], *cpp_sources, "-o", binary]
     run(command, directory, local_env, "compile")
     return directory, binary, local_env
 
@@ -219,6 +221,74 @@ def test_page(page, width, seed, toolchain):
         assert weights[job] == expected_w, f"weight mismatch job={job} groups={counts[job]}"
     print(report, flush=True)
     return {"module": "page_demux", "page_bytes": page, "data_w": width, "groups": counts, "report": report}
+
+
+def test_fp32(seed, toolchain, n=20000):
+    directory, binary, env = build("fp32_probe", {}, "fp32_main.cpp", {}, *toolchain,
+                                    sources=[RTL / "fp32_pkg.sv", RTL / "tb" / "fp32_probe.sv"])
+    rng = np.random.default_rng(seed)
+    corpus = rg.fp32_corpus(n, rng)
+    a = rng.permutation(corpus)
+    b = rng.permutation(corpus)
+    # Pair every value with a same-magnitude neighbour of both signs (cancellation),
+    # and with exact negation (x + -x = +0).
+    b[: len(b) // 8] = a[: len(b) // 8] ^ np.uint32(0x80000000)
+    k = len(b) // 8
+    b[k: 2 * k] = (a[k: 2 * k] ^ np.uint32(0x80000000)) + rng.integers(0, 4, k, dtype=np.uint32)
+    h = rng.integers(0, 1 << 16, a.size, dtype=np.uint32)
+    e = (rng.integers(-200, 200, a.size) & 0xFFFF).astype(np.uint32)
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        for row in zip(a, b, h, e):
+            out.write(" ".join(format(int(v), "x") for v in row) + "\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results], directory, env, "simulate")
+    actual = np.loadtxt(results, dtype=str, ndmin=2)
+    actual = np.vectorize(lambda t: int(t, 16), otypes=[np.uint64])(actual).astype(np.uint32)
+    expected = rg.fp32_expected(a, b, h, e)
+    names = ("mul", "add", "i2f", "h2f", "pow2")
+    for col, (name, exp) in enumerate(zip(names, expected)):
+        got, want = actual[:, col], rg.canonical(exp)
+        bad = np.flatnonzero(got != want)
+        if bad.size:
+            i = bad[0]
+            raise AssertionError(f"fp32 {name} mismatch ({bad.size}): a={a[i]:08x} b={b[i]:08x} "
+                                 f"h={h[i]:04x} e={e[i]:04x} got={got[i]:08x} want={want[i]:08x}")
+    report = report.replace("PASS-CANDIDATE", "PASS")
+    print(report, flush=True)
+    return {"module": "fp32_pkg", "vectors": int(a.size), "report": report}
+
+
+def test_bfp(lanes, seed, toolchain, n_groups=160):
+    from accel_golden import bfp_quant
+    directory, binary, env = build("bfp_quant", {"LANES": lanes}, "bfp_main.cpp", {"BFP_LANES": lanes}, *toolchain,
+                                    sources=[RTL / "fp32_pkg.sv", RTL / "bfp_quant.sv"])
+    rng = np.random.default_rng(seed)
+    x = rg.activation_groups(n_groups, rng)
+    m, e = bfp_quant(x.reshape(-1), 16, 128)
+    vectors = directory / "vectors.txt"
+    bits = rg.f32_bits(x).reshape(-1, lanes)
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(bits)}\n")
+        for beat in bits:
+            out.write(packed_hex(beat, 32) + "\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    lines = results.read_text().split("\n")[:-1]
+    beats = 128 // lanes
+    assert len(lines) == len(bits), "bfp beat count"
+    for i, line in enumerate(lines):
+        mant_hex, exp, last, invalid = line.split()
+        value = int(mant_hex, 16)
+        got = [((value >> (16 * k)) & 0xFFFF) for k in range(lanes)]
+        got = np.array(got, np.uint16).view(np.int16)
+        g, b = divmod(i, beats)
+        want = m[g, b * lanes:(b + 1) * lanes]
+        if not np.array_equal(got, want) or int(exp) != e[g] or int(last) != (b == beats - 1) or invalid != "0":
+            raise AssertionError(f"bfp mismatch group={g} beat={b}: exp {exp} vs {e[g]}, "
+                                 f"mant {got[:4]} vs {want[:4]}")
+    print(report, flush=True)
+    return {"module": "bfp_quant", "lanes": lanes, "groups": n_groups, "report": report}
 
 
 def main():
