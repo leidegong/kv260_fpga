@@ -23,6 +23,15 @@ class Burst:
         return self.beat_bytes.bit_length() - 1
 
 
+def split_write(address, nbytes, beat_bytes=16, max_beats=256, address_bits=49):
+    """Same 4 KiB / MAX_BEATS beat split as split_read, for an AW/W planner.
+
+    Aligned full-beat requests only. The caller issues AW/W/B in order with
+    outstanding depth decided elsewhere; this function only lists the bursts.
+    """
+    return split_read(address, nbytes, beat_bytes, max_beats, address_bits)
+
+
 def split_read(address, nbytes, beat_bytes=16, max_beats=256, address_bits=49):
     """Aligned full-beat requests only. The caller reassembles responses in order."""
     if any(type(x) is not int for x in (address, nbytes, beat_bytes, max_beats, address_bits)):

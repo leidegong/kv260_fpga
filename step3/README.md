@@ -62,7 +62,9 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 | `rtl/page_demux.sv` | W4/g128 S/W页分流、尾页padding剔除、ready/valid反压 | AXI主机、乱序重排、scale缓存、W8模式 |
 | `rtl/w4a16_dot.sv` | 128元素组内精确整数点积，LANES可配置 | BFP量化、完整矩阵调度 |
 | `rtl/scale_accum.sv` | INT32组积 × FP16 scale × 2^e，再按组做FP32累加 | BFP量化器、多行调度、200 MHz流水 |
-| `rtl/axi_read_master.sv` | 按4 KiB/MAX_BEATS拆分的outstanding=1 AXI4读 | 写通道、多口重排、驱动、地址转换 |
+| `rtl/gemv_row.sv` | 单行：`page_demux`→scale FIFO→`w4a16_dot`→`scale_accum`，对拍`VPU.gemv` | 多行调度、DDR控制器、SPU |
+| `rtl/axi_read_master.sv` | 按4 KiB/MAX_BEATS拆分的outstanding=1 AXI4读 | 多口重排、驱动、地址转换 |
+| `rtl/axi_write_master.sv` | 同一拆分契约的 outstanding=1 AXI4写 | 多口重排、驱动、地址转换 |
 
 A16表示有符号整数尾数，**不是IEEE FP16**。`scale_accum`的有限结果与`VPU.gemv`的FP32公式逐位一致（0 ULP）；NaN规范为`0x7fc00000`，不要求与主机libm的NaN位型相同。默认32路dot只用于功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。AXI读主机不是HP口驱动，也没有寄存器地址。
 
@@ -73,7 +75,7 @@ python3 run_rtl_tests.py
 
 使用实际Verilator仿真RTL，再与NumPy、现有页打包器和`split_read`比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。Verilator可以装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
 
-完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，`scale_accum`，以及AXI数据宽度128/64/32和不同MAX_BEATS。含随机停顿、结果反压、复位、极值与尾页。`--quick`运行默认dot/page、scale累加和一种AXI配置。SPU的exp/rsqrt仍没有RTL。
+完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，`scale_accum`、`gemv_row`，以及AXI读/写数据宽度128/64/32和不同MAX_BEATS。含随机停顿、结果反压、复位、极值与尾页。`--quick`运行默认dot/page、scale累加、单行GEMV和一种AXI读+写配置。SPU的exp/rsqrt仍没有RTL。
 
 安装Vivado的K26器件支持后可运行：
 
@@ -105,6 +107,6 @@ python3 board_probe.py --out board_probe.json
 | `export_kv260.py` / `run_bundle.py` | 可校验软件部署包、无副作用镜像执行及精度对照 |
 | `platforms.py` / `kv260_report.py` | KV260端口、计算及存储预算；预测非板测 |
 | `kv260/axi_plan.py` / `board_probe.py` | AXI契约、只读板卡信息 |
-| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、AXI读拆分，以及真实RTL仿真 |
+| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、单行GEMV、AXI读写拆分，以及真实RTL仿真 |
 
 软件回归、unittest和RTL的当次结果见 [验证记录](out/validation_report.md)。实际部署的剩余工作见 [路线图](../docs/ROADMAP.md)。

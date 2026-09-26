@@ -3,9 +3,9 @@
 | Check | Result |
 |---|---|
 | Core software selftest | 24 passed, 1 optional Torch/CUDA check skipped, 0 failed (10.0 s) |
-| Bundle + AXI plan + KV260 budget unittest | 17 passed (0.745 s) |
-| Real RTL simulation | 12 parameter configurations passed (129.88 s, seed 12345) |
-| KV260 budget script | Re-run; `out/kv260_report.md` unchanged |
+| Bundle + AXI plan + KV260 budget unittest | 18 passed (0.850 s) |
+| Real RTL simulation | 18 parameter configurations passed (196.86 s, seed 12345) |
+| KV260 budget script | Not re-run in this pass; prior `out/kv260_report.md` unchanged |
 | Real Qwen3-1.7B weight accuracy | NOT RUN; no real checkpoint downloaded |
 | Vivado synthesis / implementation | NOT RUN; no usable Vivado found |
 | KV260 deployment / performance | NOT RUN; board environment not ready |
@@ -16,16 +16,14 @@ Commands executed from `step3` on this host (Linux, CPython 3.13, NumPy 2.2.4, V
 python3 selftest.py
 python3 -m unittest test_export_kv260 test_axi_plan test_kv260_perf -v
 python3 run_rtl_tests.py
-python3 kv260_report.py --context 1024 --ddr-eff .8 --axi-eff .85 --cycles
 ```
-
-`selftest.py` still uses fixed seeds. Versus the 2026-09-25 snapshot, a few tiny-model logit errors changed in the last reported digit (for example A16/KV16 1.18e-04 → 1.17e-04). The pass/fail checks did not change. This run did not regenerate `out/kv260_qwen3_plan` or the tiny bundle; exporter behavior is covered by `test_export_kv260`.
 
 RTL additions in this run:
 
-- `scale_accum`: 63 jobs, finite values and infinities bit-exact (0 ULP) with the `VPU.gemv` FP32 formula. NaN results are canonical `0x7fc00000`, not host-libm NaN bits.
-- `axi_read_master`: DATA_W 128/64/32 and MAX_BEATS 256 or 16. AR descriptors match `split_read`. Illegal commands and a mid-burst SLVERR were simulated. Outstanding depth is 1. Not a driver and not a board measurement.
+- `gemv_row`: wires `page_demux` → scale FIFO → `w4a16_dot` → `scale_accum` for one row. Weight stream from `ddr_pager.pack_stream` (W4/g128). Results bit-exact with the `VPU.gemv` FP32 formula (0 ULP finite/inf; NaN `0x7fc00000`). Included in `--quick`.
+- `axi_write_master` + `split_write`: same 4 KiB / MAX_BEATS outstanding-1 contract as the read path. Not a driver and not a board measurement.
+- GitHub Actions `rtl-sim`: selftest + unittest + `run_rtl_tests.py --quick`.
 
-Software throughput estimates are not board measurements. `out/host_probe.json` describes the earlier Windows host only, not a KV260.
+Software throughput estimates are not board measurements. No bitstream, utilization, timing, or tok/s hardware claim.
 
-Detailed results: [core software](selftest_report.md), [RTL](rtl_report.md), [budget](kv260_report.md), [bundle smoke](bundle_smoke.json) (previous snapshot, not re-executed here).
+Detailed results: [core software](selftest_report.md), [RTL](rtl_report.md), [budget](kv260_report.md).

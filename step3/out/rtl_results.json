@@ -2,7 +2,7 @@
   "status": "PASS",
   "simulator": "/workspace/repos/kv260_fpga/step3/rtl/.tools/verilator/bin/verilator_bin",
   "seed": 12345,
-  "elapsed_s": 129.88,
+  "elapsed_s": 196.86,
   "tests": [
     {
       "module": "w4a16_dot",
@@ -85,6 +85,30 @@
       "report": "PASS scale jobs=63 cycles=1050 stalled=248 blocked_result_reset=1 partial_reset=1"
     },
     {
+      "module": "gemv_row",
+      "page_bytes": 8192,
+      "data_w": 512,
+      "lanes": 32,
+      "jobs": 9,
+      "report": "PASS gemv lanes=32 page=8192 data_w=512 jobs=9 cycles=4309 stalled=37 act_stalled=1398 partial_reset=1"
+    },
+    {
+      "module": "gemv_row",
+      "page_bytes": 8192,
+      "data_w": 512,
+      "lanes": 128,
+      "jobs": 9,
+      "report": "PASS gemv lanes=128 page=8192 data_w=512 jobs=9 cycles=3053 stalled=58 act_stalled=1464 partial_reset=1"
+    },
+    {
+      "module": "gemv_row",
+      "page_bytes": 4096,
+      "data_w": 128,
+      "lanes": 32,
+      "jobs": 9,
+      "report": "PASS gemv lanes=32 page=4096 data_w=128 jobs=9 cycles=6096 stalled=46 act_stalled=3002 partial_reset=1"
+    },
+    {
       "module": "axi_read_master",
       "data_w": 128,
       "max_beats": 256,
@@ -111,6 +135,27 @@
       "max_beats": 16,
       "cases": 9,
       "report": "PASS axi data_w=32 cases=9 cycles=16687 ar_stalls=650 out_stalls=10278 resets=9"
+    },
+    {
+      "module": "axi_write_master",
+      "data_w": 128,
+      "max_beats": 256,
+      "cases": 8,
+      "report": "PASS axi_write data_w=128 cases=8 cycles=3206 aw_stalls=16 w_stalls=2054 resets=8"
+    },
+    {
+      "module": "axi_write_master",
+      "data_w": 64,
+      "max_beats": 256,
+      "cases": 8,
+      "report": "PASS axi_write data_w=64 cases=8 cycles=5590 aw_stalls=22 w_stalls=3590 resets=8"
+    },
+    {
+      "module": "axi_write_master",
+      "data_w": 32,
+      "max_beats": 16,
+      "cases": 9,
+      "report": "PASS axi_write data_w=32 cases=9 cycles=17829 aw_stalls=650 w_stalls=10278 resets=9"
     }
   ]
 }

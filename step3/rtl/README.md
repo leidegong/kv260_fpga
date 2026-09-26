@@ -2,10 +2,10 @@
 
 These are independently simulated synthesizable SystemVerilog cores, **not a
 complete Qwen3 accelerator or a KV260 bitstream**. There is no DDR controller,
-instruction controller, scale RAM, KV cache, SPU or tokenizer in this directory.
-`axi_read_master` is only an outstanding-1 read splitter. No synthesis,
-place/route, clock-frequency or board-throughput claim follows from the
-functional tests.
+instruction controller, KV cache, SPU or tokenizer in this directory.
+`gemv_row` adds an on-path scale FIFO for one row only. `axi_read_master` /
+`axi_write_master` are outstanding-1 splitters. No synthesis, place/route,
+clock-frequency or board-throughput claim follows from the functional tests.
 
 ## `w4a16_dot.sv`
 
@@ -72,6 +72,23 @@ y    = term[0];  y = f32(y + term[g]) for later groups
   operations. It is a correctness leaf, not a pipelined 200 MHz operator and
   not a DSP/LUT estimate.
 
+## `gemv_row.sv`
+
+One GEMV row datapath that wires the three numeric leaves:
+
+```text
+page_demux → scale FIFO → w4a16_dot → scale_accum
+```
+
+- Weight input is `ddr_pager.pack_stream` for W4 / group=128 / R=1. Activations
+  are signed A16 BFP mantissas with a per-group exponent `e` on `act_exp`.
+- The internal scale FIFO absorbs kept FP16 scales before weights are consumed,
+  so the demux scale-before-weight rule cannot deadlock through this wrapper.
+- `LANES` must divide `DATA_W/4` so each demux weight beat slices evenly.
+- Results match the same FP32 formula / `VPU.gemv` contract as `scale_accum`
+  (0 ULP finite/inf; NaN canonical `0x7fc00000`). Not a multi-row scheduler,
+  DDR controller, or timing claim.
+
 ## `axi_read_master.sv`
 
 Outstanding-1 AXI4 INCR reader. `ADDR_W` defaults to 49, `DATA_W` is 32/64/128,
@@ -92,6 +109,15 @@ address in the beat.
   interconnect burst. `rst_n` only clears this module.
 - These response codes are the stub's simulation contract. They are not a
   KV260 register map and not a measured HP-port result.
+
+## `axi_write_master.sv`
+
+Outstanding-1 AXI4 INCR writer. Same 4 KiB / `MAX_BEATS` split as
+`kv260.axi_plan.split_write` (identical rules to `split_read`). Full-beat
+aligned writes only (`WSTRB` all ones). AW, then W beats with `WLAST`, then B
+before the next AW. A nonzero `BRESP` stops further AW. Illegal descriptors
+complete with `done_resp = 2'b10` and do not touch AXI. Not a KV260 register
+map and not a measured HP-port result.
 
 ## Reproduce the tests
 

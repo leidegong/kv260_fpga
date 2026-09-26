@@ -1,4 +1,4 @@
-"""Build actual Verilated RTL and check it against NumPy, the DDR packer and split_read.
+"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read and split_write.
 
 Run: python run_rtl_tests.py [--quick] [--seed 12345]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
@@ -22,7 +22,7 @@ import time
 import numpy as np
 
 from ddr_pager import StreamLayout, pack_stream
-from kv260.axi_plan import split_read
+from kv260.axi_plan import split_read, split_write
 
 BASE = Path(__file__).resolve().parent
 RTL = BASE / "rtl"
@@ -106,14 +106,23 @@ def compiler_environment():
     raise RuntimeError("MSVC toolchain not found. Set VSCMD_BAT to vcvars64.bat or run from an x64 developer shell.")
 
 
-def build(top, parameters, harness, defines, simulator, root, compiler, env):
+def build(top, parameters, harness, defines, simulator, root, compiler, env, extra_sv=()):
     suffix = "_".join(f"{key}{value}" for key, value in parameters.items()) or "default"
     directory = BUILD / f"{top}_{suffix}"
     directory.mkdir(parents=True, exist_ok=True)
     local_env = env.copy()
     local_env["VERILATOR_ROOT"] = str(root)
+    sources_sv = [RTL / name for name in extra_sv] + [RTL / f"{top}.sv"]
+    # De-duplicate while preserving order (top last so -G applies to the leaf wrapper).
+    seen = set()
+    ordered = []
+    for path in sources_sv:
+        key = path.resolve()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
     args = [simulator, "--cc", "--no-timing", "--assert", "-Wall", "--top-module", top,
-            "--Mdir", directory, *[f"-G{k}={v}" for k, v in parameters.items()], RTL / f"{top}.sv"]
+            "--Mdir", directory, *[f"-G{k}={v}" for k, v in parameters.items()], *ordered]
     run(args, directory, local_env, "verilate")
     generated = sorted(directory.glob(f"V{top}*.cpp"))
     includes = [directory, root / "include", root / "include/vltstd", RTL / "tb"]
@@ -340,6 +349,116 @@ def test_scale(seed, toolchain):
     return {"module": "scale_accum", "jobs": len(jobs), "report": report}
 
 
+def test_gemv(page, width, lanes, seed, toolchain):
+    """One-row page_demux → w4a16_dot → scale_accum against VPU.gemv / FP32 formula."""
+    directory, binary, env = build(
+        "gemv_row",
+        {"PAGE_BYTES": page, "DATA_W": width, "LANES": lanes},
+        "gemv_main.cpp",
+        {"GEMV_LANES": lanes, "GEMV_PAGE_BYTES": page, "GEMV_DATA_W": width},
+        *toolchain,
+        extra_sv=("page_demux.sv", "w4a16_dot.sv", "scale_accum.sv"),
+    )
+    rng = np.random.default_rng(seed)
+    from accel_golden import AccelCfg, Decoded, VPU, bfp_quant
+
+    jobs = []
+
+    def add_row(q_row, scale_bits_row, activation):
+        q_row = np.asarray(q_row, dtype=np.uint8).reshape(1, -1)
+        scale_bits_row = np.asarray(scale_bits_row, dtype=np.uint16).reshape(1, -1)
+        cols = q_row.shape[1]
+        groups = cols // 128
+        layout = StreamLayout(1, cols, bits=4, group=128, page=page, R=1)
+        image = pack_stream(q_row, scale_bits_row.view(np.float16), layout)
+        for block in range(layout.n_blocks):
+            start = block * (1 + layout.wpb) * page
+            block_n = min(layout.spp, groups - block * layout.spp)
+            image[start + block_n * 2: start + page] = 0xED
+            end = start + page + ((block_n * 64 + page - 1) // page) * page
+            image[start + page + block_n * 64: end] = 0xAB
+        mantissa, exponent = bfp_quant(activation, 16, 128)
+        if int(np.max(np.abs(exponent))) >= 32768:
+            raise AssertionError("BFP exponent does not fit signed int16")
+        weights = Decoded(q_row, scale_bits_row.view(np.float16), 4, 128)
+        golden = VPU(AccelCfg()).gemv(weights, activation)
+        products = np.array([
+            int(weights.q[0, g].astype(np.int64) @ mantissa[g].astype(np.int64))
+            for g in range(groups)
+        ], dtype=np.int64)
+        formula = int(reference_accum(products, scale_bits_row[0], exponent))
+        vpu_bits = int(np.asarray(golden[0], dtype=np.float32).view(np.uint32))
+        expect = int(expected_accum(products, scale_bits_row[0], exponent))
+        if formula != vpu_bits:
+            raise AssertionError("VPU.gemv diverged from the FP32 formula in gemv_row vectors")
+        beat_bytes = width // 8
+        raw = image.tobytes()
+        stream = [raw[i:i + beat_bytes][::-1].hex() for i in range(0, len(raw), beat_bytes)]
+        act_beats = []
+        flat_m = mantissa.astype(np.int16).reshape(-1)
+        for start in range(0, flat_m.size, lanes):
+            act_beats.append(packed_hex(flat_m[start:start + lanes], 16))
+        jobs.append({
+            "groups": groups,
+            "stream": stream,
+            "act_beats": act_beats,
+            "exps": [int(v) for v in exponent.tolist()] if groups else [],
+            "expected": expect if groups else 0,
+        })
+
+    # Zero-group command: no stream bytes, result +0.
+    jobs.append({"groups": 0, "stream": [], "act_beats": [], "exps": [], "expected": 0})
+
+    # Single group extremes and a few random rows, including multi-block when page is small.
+    for groups in sorted(set([1, 2, 3, 7, page // 64, page // 64 + 1, min(page // 2, 48)])):
+        if groups <= 0:
+            continue
+        cols = groups * 128
+        q = rng.integers(0, 16, (cols,), dtype=np.uint8)
+        if groups >= 1:
+            q[:128] = 0
+        if groups >= 2:
+            q[128:256] = 15
+        scales = rng.integers(1, 0x7800, (groups,), dtype=np.uint16)
+        scales[0] = 0x3C00
+        activation = rng.normal(size=(cols,)).astype(np.float32) * 0.05
+        activation[0] = np.float32(1.0)
+        add_row(q, scales, activation)
+
+    # Exact VPU path with intentional cancellation / subnormals.
+    cols = 8 * 128
+    q = rng.integers(0, 16, (cols,), dtype=np.uint8)
+    scales = rng.integers(0x0001, 0x4000, (8,), dtype=np.uint16)
+    activation = rng.normal(size=(cols,)).astype(np.float32)
+    activation[0] = np.float32(1e-5)
+    add_row(q, scales, activation)
+
+    vectors = directory / "vectors.txt"
+    expected = []
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for job in jobs:
+            out.write(f"{job['groups']} {len(job['stream'])} {len(job['act_beats'])}\n")
+            for beat in job["stream"]:
+                out.write(beat + "\n")
+            for beat in job["act_beats"]:
+                out.write(beat + "\n")
+            for exp in job["exps"]:
+                out.write(f"{exp}\n")
+            expected.append(job["expected"])
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if len(actual) != len(expected):
+        raise AssertionError(f"gemv result count {len(actual)} != {len(expected)}")
+    for index, (got, want) in enumerate(zip(actual, expected)):
+        if got != want:
+            raise AssertionError(f"gemv job {index}: rtl {got:08x} expected {want:08x}")
+    print(report, flush=True)
+    return {"module": "gemv_row", "page_bytes": page, "data_w": width, "lanes": lanes,
+            "jobs": len(jobs), "report": report}
+
+
 def axi_byte(addr):
     return ((addr * 131 + 17) ^ (addr >> 8)) & 0xFF
 
@@ -426,6 +545,100 @@ def test_axi(data_w, max_beats, seed, toolchain):
             "cases": len(cases), "report": report}
 
 
+def test_axi_write(data_w, max_beats, seed, toolchain):
+    beat = data_w // 8
+    directory, binary, env = build(
+        "axi_write_master",
+        {"ADDR_W": 49, "DATA_W": data_w, "MAX_BEATS": max_beats},
+        "axi_write_main.cpp", {"DATA_W": data_w}, *toolchain)
+    address_bits = 49
+    top = (1 << address_bits) - beat
+    cases = [
+        (0, 8192, 0),
+        (4096 - beat, beat * 2, 0),
+        (0x100000010, 4096, 0),
+        (0, 0, 0),
+        (1, beat, 0),
+        (top, beat * 2, 0),
+        (top, beat, 0),
+        (0, 8192, 1),
+    ]
+    if max_beats < 256:
+        cases.append((128, 8192, 0))
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(cases)}\n")
+        for addr, nbytes, err in cases:
+            out.write(f"{addr:x} {nbytes} {err}\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    blocks = []
+    current = None
+    for line in results.read_text().splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "CASE":
+            current = {"aw": [], "beats": [], "lasts": [], "strb": [], "resp": None}
+            blocks.append(current)
+        elif parts[0] == "AW":
+            current["aw"].append((int(parts[1], 16), int(parts[2]), int(parts[3]), int(parts[4])))
+        elif parts[0] == "W":
+            current["beats"].append(int(parts[1], 16))
+            current["lasts"].append(int(parts[2]))
+            current["strb"].append(int(parts[3], 16))
+        elif parts[0] == "DONE":
+            current["resp"] = int(parts[1])
+    if len(blocks) != len(cases):
+        raise AssertionError(f"axi write case count {len(blocks)} != {len(cases)}")
+    for case, block in zip(cases, blocks):
+        addr, nbytes, err = case
+        try:
+            bursts = split_write(addr, nbytes, beat, max_beats, address_bits)
+        except ValueError:
+            bursts = None
+        if bursts is None:
+            if block["aw"] or block["beats"] or block["resp"] != 2:
+                raise AssertionError(f"illegal AXI write was not rejected locally: {case} resp={block['resp']}")
+            continue
+        expect = bursts[:1] if err else bursts
+        if len(block["aw"]) != len(expect):
+            raise AssertionError(f"AW count {len(block['aw'])} != {len(expect)} for {case}")
+        for seen, burst in zip(block["aw"], expect):
+            wanted = (burst.address, burst.beats, burst.beat_bytes, 1)
+            if seen != wanted:
+                raise AssertionError(f"AW {seen} != {wanted}")
+            size = burst.beats * burst.beat_bytes
+            if burst.address // 4096 != (burst.address + size - 1) // 4096:
+                raise AssertionError(f"write burst crosses 4KiB: {wanted}")
+        raw = bytearray()
+        for word in block["beats"]:
+            for lane in range(beat):
+                raw.append((word >> (8 * lane)) & 0xFF)
+        length = sum(burst.beats * burst.beat_bytes for burst in expect)
+        wanted_bytes = bytes(axi_byte(addr + offset) for offset in range(length))
+        if bytes(raw) != wanted_bytes:
+            raise AssertionError(f"AXI write payload mismatch for {case}: {len(raw)} bytes vs {length}")
+        if block["resp"] != (2 if err else 0):
+            raise AssertionError(f"AXI write resp {block['resp']} for {case}")
+        # WLAST is per burst, matching each AW beat count.
+        cursor = 0
+        for burst in expect:
+            end = cursor + burst.beats
+            chunk = block["lasts"][cursor:end]
+            if len(chunk) != burst.beats or chunk[-1] != 1 or any(flag == 1 for flag in chunk[:-1]):
+                raise AssertionError(f"WLAST sequence invalid for {case} burst@{burst.address}: {chunk}")
+            cursor = end
+        if cursor != len(block["lasts"]):
+            raise AssertionError(f"extra W beats for {case}")
+        full_strb = (1 << beat) - 1
+        if any(s != full_strb for s in block["strb"]):
+            raise AssertionError(f"expected full WSTRB for aligned writes in {case}")
+    print(report, flush=True)
+    return {"module": "axi_write_master", "data_w": data_w, "max_beats": max_beats,
+            "cases": len(cases), "report": report}
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -448,6 +661,9 @@ def write_rtl_report(summary):
             config = f"PAGE={test['page_bytes']}, DATA_W={test['data_w']}"
         elif module == "scale_accum":
             config = f"jobs={test['jobs']}"
+        elif module == "gemv_row":
+            config = (f"PAGE={test['page_bytes']}, DATA_W={test['data_w']}, "
+                      f"LANES={test['lanes']}, jobs={test['jobs']}")
         else:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
         lines.append(f"| {module} | {config} | {test['report']} |")
@@ -457,7 +673,11 @@ def write_rtl_report(summary):
         "",
         "scale_accum finite values and infinities are bit-exact (0 ULP) with `VPU.gemv`: `f32(f32(P) * (f32(fp16 scale) * f32(2^e)))`, then a sequential roundTiesToEven FP32 add. The first group is copied, not added to +0. NaN results from invalid operations or NaN inputs are canonical `0x7fc00000` and are not required to match host libm NaN sign/payload.",
         "",
+        "gemv_row wires `page_demux` → scale FIFO → `w4a16_dot` → `scale_accum` for one row. The weight stream is `ddr_pager.pack_stream` (W4/g128). Activations are A16 mantissas plus per-group BFP `e`. Results match the same FP32 formula / `VPU.gemv` bits as `scale_accum`. The scale FIFO prevents the demux scale/weight deadlock. No DDR controller or multi-row schedule.",
+        "",
         "axi_read_master descriptors match `kv260.axi_plan.split_read` (4 KiB boundary and MAX_BEATS, outstanding 1). Beats are little-endian. Illegal descriptors complete with SLVERR and no AR. A nonzero RRESP drains the current burst and does not issue another. No board address map is claimed.",
+        "",
+        "axi_write_master uses the same split via `split_write` (identical rules). Outstanding 1: AW, W beats, then B before the next AW. Full WSTRB on aligned beats. A nonzero BRESP stops further AW. Not a driver and not a board measurement.",
         "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
@@ -467,9 +687,11 @@ def write_rtl_report(summary):
         "",
     ])
     for rel in (
-        "rtl/w4a16_dot.sv", "rtl/page_demux.sv", "rtl/scale_accum.sv", "rtl/axi_read_master.sv",
-        "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/axi_main.cpp",
-        "rtl/tb/sim_common.h", "run_rtl_tests.py",
+        "rtl/w4a16_dot.sv", "rtl/page_demux.sv", "rtl/scale_accum.sv", "rtl/gemv_row.sv",
+        "rtl/axi_read_master.sv", "rtl/axi_write_master.sv",
+        "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
+        "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp", "rtl/tb/sim_common.h",
+        "run_rtl_tests.py", "kv260/axi_plan.py",
     ):
         digest = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
         lines.append(f"- `{rel}`: `{digest}`")
@@ -479,7 +701,7 @@ def write_rtl_report(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="default dot/page plus scale_accum and one AXI master")
+    parser.add_argument("--quick", action="store_true", help="default dot/page, scale_accum, gemv_row, and one AXI read+write master")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -493,8 +715,13 @@ def main():
     reports += [test_page(p, w, args.seed, toolchain) for p, w in
                 ([(8192, 512)] if args.quick else [(8192, 512), (8192, 128), (4096, 64)])]
     reports.append(test_scale(args.seed, toolchain))
+    gemv_cfgs = [(8192, 512, 32)] if args.quick else [(8192, 512, 32), (8192, 512, 128), (4096, 128, 32)]
+    reports += [test_gemv(page, width, lanes, args.seed, toolchain)
+                for page, width, lanes in gemv_cfgs]
     axi_cfgs = [(128, 256)] if args.quick else [(128, 256), (128, 16), (64, 256), (32, 16)]
     reports += [test_axi(width, beats, args.seed, toolchain) for width, beats in axi_cfgs]
+    axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
+    reports += [test_axi_write(width, beats, args.seed, toolchain) for width, beats in axi_wr_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
                "elapsed_s": round(time.perf_counter()-start, 2), "tests": reports}
     (BUILD / "summary.json").write_text(json.dumps(summary, indent=2)+"\n", encoding="utf-8")
