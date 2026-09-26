@@ -22,7 +22,7 @@ RTL additions in this run:
 
 - `gemv_row`: wires `page_demux` → scale FIFO → `w4a16_dot` → `scale_accum` for one row. Weight stream from `ddr_pager.pack_stream` (W4/g128). Results bit-exact with the `VPU.gemv` FP32 formula (0 ULP finite/inf; NaN `0x7fc00000`). Included in `--quick`.
 - `axi_write_master` + `split_write`: same 4 KiB / MAX_BEATS outstanding-1 contract as the read path. Not a driver and not a board measurement.
-- GitHub Actions `rtl-sim`: selftest + unittest + `run_rtl_tests.py --quick`.
+- GitHub Actions 草稿 `rtl-sim.yml` 已写好但未推送（OAuth token 缺 `workflow` scope）。
 
 Software throughput estimates are not board measurements. No bitstream, utilization, timing, or tok/s hardware claim.
 

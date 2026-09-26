@@ -59,6 +59,6 @@ python3 run_rtl_tests.py --quick
 python3 run_rtl_tests.py
 ```
 
-`--quick` 覆盖默认 dot/page，外加 `scale_accum`、`gemv_row` 和一种 AXI 读/写配置。完整矩阵还包含其余位宽和 burst 上限。没有 Verilator、编译失败或比较失败都会非零退出，不会改成“只跑软件就算 RTL 通过”。GitHub Actions 工作流 `rtl-sim` 跑 selftest + unittest + `--quick`。
+`--quick` 覆盖默认 dot/page，外加 `scale_accum`、`gemv_row` 和一种 AXI 读/写配置。完整矩阵还包含其余位宽和 burst 上限。没有 Verilator、编译失败或比较失败都会非零退出，不会改成“只跑软件就算 RTL 通过”。本地可用的 CI 草稿在未推送的 `.github/workflows/rtl-sim.yml`（当前 token 缺 `workflow` scope）；内容为 selftest + unittest + `--quick`。
 
 导出、真实权重接口和每个叶模块的边界见 [step3/README.md](step3/README.md) 与 [step3/rtl/README.md](step3/rtl/README.md)。
