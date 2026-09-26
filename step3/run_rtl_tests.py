@@ -1,6 +1,6 @@
 """Build actual Verilated RTL and check it against NumPy/DDR packer vectors.
 
-Run: python run_rtl_tests.py [--quick] [--seed 12345]
+Run: python run_rtl_tests.py [--quick] [--seed 12345] [--only gemv axi_rd] [--jobs 4]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
 Windows needs an installed MSVC C++ toolset; Linux/macOS need a C++20 compiler.
 No packages or global settings are changed by this runner. Build products, vectors,
@@ -335,11 +335,86 @@ def test_gemv(width, seed, toolchain, shapes=((37, 256), (2100, 256), (5, 768), 
     return {"module": "gemv_core", "data_w": width, "shapes": [list(x) for x in shapes], "report": report}
 
 
+def test_axi_rd(ports, width, seed, toolchain, out_beats=1):
+    directory, binary, env = build("axi_rd_mport", {"NPORTS": ports, "DATA_W": width, "TIMEOUT": 4000,
+                                                    "OUT_BEATS": out_beats},
+                                    "rd_main.cpp", {"RD_NPORTS": ports, "RD_DATA_W": width, "RD_OUT_BEATS": out_beats},
+                                    *toolchain)
+    rng = np.random.default_rng(seed)
+    beat = width // 8 * out_beats
+    mem = 1 << 20
+    cmds = [(0, beat), (4096 - beat, 2 * beat), (3 * 4096, 8192), (4096 + 5 * beat, 3 * 8192),
+            (8192, 65536), (mem - 8192, 8192)]
+    for _ in range(40):
+        size = int(rng.integers(1, 3000)) * beat
+        cmds.append((int(rng.integers(0, (mem - size) // beat)) * beat, size))
+    vectors = directory / "vectors.txt"
+    vectors.write_text(f"{mem} {len(cmds)}\n" + "".join(f"{a} {b}\n" for a, b in cmds), encoding="ascii")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    text = results.read_text()
+    assert all(f"fault{b} ok" in text for b in range(3)), "AXI fault checks missing"
+    print(report, flush=True)
+    return {"module": "axi_rd_mport", "ports": ports, "data_w": width, "out_beats": out_beats,
+            "commands": len(cmds), "report": report}
+
+
+def test_axi_wr(width, seed, toolchain):
+    directory, binary, env = build("axi_wr_stream", {"DATA_W": width, "TIMEOUT": 4000},
+                                    "wr_main.cpp", {"WR_DATA_W": width}, *toolchain)
+    rng = np.random.default_rng(seed)
+    mem = 1 << 18
+    # KV-style writes: 2-byte scales at any even offset, 128-byte rows, page-sized and 4 KiB-crossing spans.
+    cmds = [(2, 2), (4094, 4), (4096 - 128, 256), (8192 + 7, 1), (12288, 8192), (100, 5000)]
+    for _ in range(60):
+        size = int(rng.choice([1, 2, 3, 128, 130, int(rng.integers(1, 9000))]))
+        cmds.append((int(rng.integers(0, mem - size)), size))
+    vectors = directory / "vectors.txt"
+    vectors.write_text(f"{mem} {len(cmds)}\n" + "".join(f"{a} {b}\n" for a, b in cmds), encoding="ascii")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    text = results.read_text()
+    assert all(f"fault{b} ok" in text for b in range(3)), "AXI write fault checks missing"
+    print(report, flush=True)
+    return {"module": "axi_wr_stream", "data_w": width, "commands": len(cmds), "report": report}
+
+
+def test_bw(ports, seed, toolchain):
+    directory, binary, env = build("bw_test_top", {"NPORTS": ports}, "bw_main.cpp", {"BW_NPORTS": ports}, *toolchain,
+                                    sources=[RTL / "kv260_regs_pkg.sv", RTL / "axil_slave.sv", RTL / "axi_rd_mport.sv",
+                                             RTL / "axi_wr_stream.sv", RTL / "bw_test_top.sv"])
+    report = run([binary, directory / "results.txt", seed], directory, env, "simulate")
+    print(report, flush=True)
+    return {"module": "bw_test_top", "ports": ports, "report": report}
+
+
+def plan(quick):
+    """(name, callable(seed, toolchain)) for every RTL configuration."""
+    jobs = [("fp32", lambda seed, tc: test_fp32(seed, tc))]
+    jobs += [(f"dot{n}", lambda seed, tc, n=n: test_dot(n, seed, tc)) for n in ([32] if quick else [1, 8, 32, 128])]
+    jobs += [(f"page{p}x{w}", lambda seed, tc, p=p, w=w: test_page(p, w, seed, tc))
+             for p, w in ([(8192, 512)] if quick else [(8192, 512), (8192, 128), (4096, 64)])]
+    jobs += [(f"bfp{n}", lambda seed, tc, n=n: test_bfp(n, seed, tc)) for n in ([32] if quick else [8, 32, 128])]
+    jobs += [(f"gemv{w}", lambda seed, tc, w=w: test_gemv(w, seed, tc) if w != 64 else
+              test_gemv(w, seed, tc, shapes=((37, 256), (2100, 256), (3, 384))))
+             for w in ([128] if quick else [64, 128, 512])]
+    jobs += [(f"axi_rd{n}x{w}k{k}", lambda seed, tc, n=n, w=w, k=k: test_axi_rd(n, w, seed, tc, k))
+             for n, w, k in ([(4, 128, 4)] if quick else [(4, 128, 4), (4, 128, 1), (2, 64, 2), (3, 32, 1), (1, 128, 1)])]
+    jobs += [(f"axi_wr{w}", lambda seed, tc, w=w: test_axi_wr(w, seed, tc)) for w in ([128] if quick else [32, 64, 128])]
+    jobs += [(f"bw{n}", lambda seed, tc, n=n: test_bw(n, seed, tc)) for n in ([4] if quick else [1, 2, 4])]
+    return jobs
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="only default LANES=32/page8192 width512")
+    parser.add_argument("--quick", action="store_true", help="one configuration per module")
     parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument("--only", nargs="*", default=None, help="run jobs whose name starts with any of these")
+    parser.add_argument("--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)))
     args = parser.parse_args()
+    from kv260 import regmap
+    if regmap.PKG.read_text(encoding="utf-8") != regmap.sv_package():
+        raise RuntimeError("rtl/kv260_regs_pkg.sv is stale; run python kv260/regmap.py --write")
     BUILD.mkdir(parents=True, exist_ok=True)
     (BUILD / "summary.json").write_text('{"status":"RUNNING"}\n', encoding="utf-8")
     simulator, root = find_verilator()
@@ -347,9 +422,17 @@ def main():
     print(f"RTL simulator: {simulator}\nC++ compiler: {compiler}", flush=True)
     toolchain = simulator, root, compiler, env
     start = time.perf_counter()
-    reports = [test_dot(n, args.seed, toolchain) for n in ([32] if args.quick else [1, 8, 32, 128])]
-    reports += [test_page(p, w, args.seed, toolchain) for p, w in
-                ([(8192, 512)] if args.quick else [(8192, 512), (8192, 128), (4096, 64)])]
+    jobs = [j for j in plan(args.quick) if args.only is None or any(j[0].startswith(o) for o in args.only)]
+    if not jobs:
+        raise RuntimeError("no RTL job matches --only")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(args.jobs) as pool:
+        futures = [(name, pool.submit(fn, args.seed, toolchain)) for name, fn in jobs]
+        reports = []
+        for name, fut in futures:
+            result = fut.result()
+            result["job"] = name
+            reports.append(result)
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
                "elapsed_s": round(time.perf_counter()-start, 2), "tests": reports}
     (BUILD / "summary.json").write_text(json.dumps(summary, indent=2)+"\n", encoding="utf-8")
