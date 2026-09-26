@@ -1,0 +1,220 @@
+{
+  "research_date": "2026-09-22",
+  "scope": "智能家居摄像头感知；总参数小于 7B；比较 PL 视觉+ARM LLM 与 PL LLM 两条路线",
+  "databases_queried": [
+    {
+      "database": "arXiv API",
+      "endpoint": "https://export.arxiv.org/api/query",
+      "requests": [
+        {
+          "id_list": "2504.16266,2512.11550,2408.00462,2507.03308",
+          "method": "PowerShell Invoke-WebRequest",
+          "status": "failed",
+          "raw_error": "以一种访问权限不允许的方式做了一个访问套接字的尝试。 (export.arxiv.org:443)"
+        },
+        {
+          "id_list": "2504.16266,2512.11550,2408.00462,2507.03308,2510.15926",
+          "method": "web open",
+          "status": "failed",
+          "raw_error": "Internal Error"
+        }
+      ],
+      "successful_raw_response": null,
+      "fallback": "使用 arXiv 官方 HTML/摘要页与作者 GitHub 仓库核查；下列条目为人工整理的索引，不是 API 原始响应。"
+    }
+  ],
+  "primary_papers": [
+    {
+      "id": "2504.16266v2",
+      "title": "TeLLMe: An Energy-Efficient Ternary LLM Accelerator for Prefill and Decode on Edge FPGAs",
+      "url": "https://arxiv.org/html/2504.16266v2",
+      "status": "official_full_text_read",
+      "notes": "早期 KV260 约 0.7B 三值模型；峰值 9.51 tok/s"
+    },
+    {
+      "id": "2510.15926v1",
+      "title": "TeLLMe v2: An Efficient End-to-End Ternary LLM Prefill and Decode Accelerator with Table-Lookup Matmul on Edge FPGAs",
+      "url": "https://arxiv.org/html/2510.15926v1",
+      "status": "official_full_text_read",
+      "notes": "BitNet 0.73B；峰值 25 tok/s；Vivado/HLS 2024.1；作者代码采用 ARM NEON LM head"
+    },
+    {
+      "id": "2512.11550v1",
+      "title": "PD-Swap: Prefill–Decode Logic Swapping for End-to-End LLM Inference on Edge FPGAs via Dynamic Partial Reconfiguration",
+      "url": "https://arxiv.org/html/2512.11550v1",
+      "status": "official_full_text_read",
+      "notes": "BitNet 0.73B；摘要约27 tok/s，表格27.8；不能外推到Qwen"
+    },
+    {
+      "id": "2408.00462v1",
+      "title": "Designing Efficient LLM Accelerators for Edge Devices",
+      "url": "https://arxiv.org/html/2408.00462v1",
+      "status": "official_full_text_read"
+    },
+    {
+      "id": "2507.03308",
+      "title": "Hummingbird: A Smaller and Faster Large Language Model Accelerator on Embedded FPGA",
+      "url": "https://arxiv.org/abs/2507.03308",
+      "status": "official_abstract_read",
+      "notes": "Llama3-8B超出用户模型规模范围"
+    },
+    {
+      "doi": "10.1145/3748173.3779189",
+      "title": "Hummingbird+: Advancing FPGA-based LLM Deployment from Research Prototype to Edge Product",
+      "url": "https://dl.acm.org/doi/10.1145/3748173.3779189",
+      "status": "publisher_full_text_unavailable",
+      "notes": "本次不采用二次文章所述成本/吞吐作为采购依据"
+    }
+  ],
+  "material_checks": [
+    {
+      "subject": "KV260",
+      "url": "https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html",
+      "observed": "$249 MSRP，4GB DDR4，电源另购，网页交期26周"
+    },
+    {
+      "subject": "KR260",
+      "url": "https://www.amd.com/en/products/system-on-modules/kria/k26/kr260-robotics-starter-kit.html",
+      "observed": "$349 MSRP，4GB DDR4，网页交期26周"
+    },
+    {
+      "subject": "ZCU104",
+      "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/evaluation-boards/zcu104.html",
+      "observed": "$1678"
+    },
+    {
+      "subject": "VEK280",
+      "url": "https://www.amd.com/en/products/adaptive-socs-and-fpgas/evaluation-boards/vek280.html",
+      "observed": "$6995"
+    },
+    {
+      "subject": "DPU-PYNQ",
+      "url": "https://raw.githubusercontent.com/Xilinx/DPU-PYNQ/master/README.md",
+      "observed": "已归档；PYNQ3.0/VitisAI2.5；KV260支持记录"
+    },
+    {
+      "subject": "Vitis AI 3.5",
+      "url": "https://github.com/Xilinx/Vitis-AI/releases",
+      "observed": "官方兼容Vivado/Vitis/PetaLinux2023.1；不称其为最新版本"
+    },
+    {
+      "subject": "YOLOX-Nano 3.5",
+      "url": "https://raw.githubusercontent.com/Xilinx/Vitis-AI/v3.5/model_zoo/model-list/pt_yolox-nano_3.5/model.yaml",
+      "observed": "浮点/量化包；预编译目标VEK280/V70，未列KV260"
+    },
+    {
+      "subject": "Gemma4 E2B",
+      "url": "https://huggingface.co/google/gemma-4-E2B-it",
+      "observed": "2.3B有效，含embedding 5.1B，编码器统计需另核查"
+    },
+    {
+      "subject": "Qwen3.5架构",
+      "url": "https://huggingface.co/Qwen/Qwen3.5-0.8B/raw/main/config.json",
+      "observed": "混合linear/full attention及vision_config"
+    },
+    {
+      "subject": "llama-fpga",
+      "url": "https://github.com/adamgallas/llama-fpga",
+      "observed": "Llama2-7B AWQ；嵌入式裸机演示；KV260约5 tok/s"
+    }
+  ],
+  "v2_checks_2026-09-23": [
+    {
+      "subject": "DPUCZDX8G 生命周期",
+      "url": "https://xilinx.github.io/Vitis-AI/3.5/html/docs/reference/release_notes.html",
+      "observed": "Zynq UltraScale+ DPU 为成熟 IP，3.5 起不随版本更新"
+    },
+    {
+      "subject": "Vitis AI 6.2 支持范围",
+      "url": "https://vitisai.docs.amd.com/en/6.2/",
+      "observed": "GA 支持 Versal AI Edge 与 AI Edge Gen 2（VEK280、VEK385）；未列 Zynq UltraScale+、Kria、VE2302"
+    },
+    {
+      "subject": "Zynq UltraScale+ NPU 路线",
+      "url": "https://www.adiuvoengineering.com/post/microzed-chronicles-vitis-ai-and-the-npu",
+      "observed": "Vitis AI 5.1 引入 NPU 替代 DPU，面向 Versal AI Edge；Zynq US+ NPU 支持需联系 AMD 销售"
+    },
+    {
+      "subject": "Kria 加速应用",
+      "url": "https://xilinx.github.io/kria-apps-docs/kv260/2022.1/build/html/docs/aibox-reid/aibox_landing.html",
+      "observed": "aibox-reid 多路 RTSP 行人检测跟踪 ReID；文档基于 2022.1；xmutil loadapp 加载；Ubuntu 22.04 需升级固件"
+    },
+    {
+      "subject": "TeLLMe 仓库",
+      "url": "https://github.com/UCI-CORSA/TeLLMe_FPGA_2026",
+      "observed": "BSD-3-Clause；KV260 + PYNQ；底座模型未做对话微调；权重/缓存需从 Google Drive 下载"
+    },
+    {
+      "subject": "K26 商业级 SOM",
+      "url": "https://www.digikey.com/en/products/detail/amd/SM-K26-XCL2GC/13985266",
+      "observed": "搜索结果显示 MSRP 约 $325；AMD 官网页面抓取超时，未直接读取"
+    },
+    {
+      "subject": "VE2302 第三方板卡",
+      "url": "https://www.trenz-electronic.de/en/AMD-Versal-AI-Edge-Evalboard-with-VE2302-device-8-GB-DDR4-SDRAM-15-x12-cm/TE0950-03-EGBE21C",
+      "observed": "Trenz TE0950（8GB DDR4）、ALINX VD100、Tria VE2302 套件存在；美元价格未核实"
+    },
+    {
+      "subject": "Home Assistant Wyoming",
+      "url": "https://www.home-assistant.io/integrations/wyoming/",
+      "observed": "支持外部唤醒词/STT/TTS 服务，按主机与端口接入，可自动发现"
+    },
+    {
+      "subject": "SenseVoice-Small",
+      "url": "https://huggingface.co/FunAudioLLM/SenseVoiceSmall",
+      "observed": "234M 参数；sherpa-onnx 支持 ARM 部署；官方速度数据非 A53"
+    },
+    {
+      "subject": "sherpa-onnx KWS",
+      "url": "https://k2-fsa.github.io/sherpa/onnx/kws/index.html",
+      "observed": "提供中英 zipformer 唤醒词模型（约 3M）"
+    }
+  ],
+  "step3_checks_2026-09-24": [
+    {
+      "subject": "Hummingbird（VPU/SPU/MMU 出处）",
+      "url": "https://arxiv.org/html/2507.03308v2",
+      "status": "official_full_text_read",
+      "observed": "MMU/VPU/SPU/DCU；INT24 GEMV；column-aligned 访存 BTT 2^13/2^14；KV260 4.8 tok/s、26K LUT、179 DSP、59 BRAM+18 URAM；Table II 模型大小 3249/3690 MB（按 MiB 口径吻合）"
+    },
+    {
+      "subject": "DATE'25 前作",
+      "url": "https://arxiv.org/html/2502.10659",
+      "status": "official_full_text_read",
+      "observed": "Memory Control Unit/VPU/SPU；LLaMA2-7B AWQ W4A16；4.9 tok/s；交织的 zero/scale/权重排布"
+    },
+    {
+      "subject": "Hummingbird+",
+      "url": "https://dl.acm.org/doi/10.1145/3748173.3779189",
+      "status": "publisher_full_text_unavailable",
+      "raw_error": "PDF 直链 HTTP 403；页面出现 Cloudflare 人机验证，未绕过",
+      "observed": "仅摘要：XCZU2CG/3EG 自研板、24GB 内存、预期 BOM < $150"
+    },
+    {
+      "subject": "llama-fpga 仓库",
+      "url": "https://github.com/adamgallas/llama-fpga",
+      "observed": "SpinalHDL 源码 + 生成 Verilog + Vivado 工程；仅 LLaMA2-7B AWQ；model2bin.py 中 PAGE_SIZE = 8192；GitHub API license 字段为空；依赖 Xilinx 浮点 IP 与 DSP48E2/URAM"
+    },
+    {
+      "subject": "HME-P3P100",
+      "url": "https://www.hercules-micro.com/index/index/core?id=19",
+      "observed": "69,600 LUT6；EMB 180×36Kb=6480Kb；DSP 180×35x18（=360×18x18=720×18x9=1440×10x10）；硬核 DDR3/3L/4、LPDDR3/4/4X 控制器 1 个，支持 x32/x16；Cortex-M3 200MHz；DDR 速率未公开，数据手册 V0.3 需登录"
+    },
+    {
+      "subject": "京微齐力 Demo 原文",
+      "url": "https://fpga.eetrend.com/content/2026-09/13b65d40-8651-41f1-bfb3-eb212db87cf1-100604445.html",
+      "observed": "与用户提供文本一致；未点名所引论文，未给出 P3 资源与 DDR 参数"
+    },
+    {
+      "subject": "Qwen3-1.7B / 0.6B 配置与量化版本",
+      "url": "https://huggingface.co/Qwen/Qwen3-1.7B/raw/main/config.json",
+      "observed": "hidden 2048、inter 6144、28 层、16/8 头、head_dim 128、vocab 151936、tied；官方仅有 FP8、GGUF、GPTQ-Int8（lm_head 未量化）、MLX，无 GPTQ-Int4"
+    }
+  ],
+  "local_validation": {
+    "hardware_benchmarks": false,
+    "vivado_synthesis": false,
+    "vivado_found_in_path_or_four_common_roots": false,
+    "limitation": "未搜索所有磁盘位置；不能据此断定没有安装"
+  }
+}

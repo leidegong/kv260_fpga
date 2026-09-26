@@ -1,0 +1,16 @@
+{
+  "schema": "step3-kv260-probe-v1",
+  "system": "Windows",
+  "machine": "AMD64",
+  "kernel": "11",
+  "os_release": null,
+  "device_tree_model": null,
+  "compatible": null,
+  "memory": {},
+  "fpga_manager_state": null,
+  "fpga_manager_name": null,
+  "kv260_identified": false,
+  "bandwidth_measured": false,
+  "overlay_loaded_by_this_script": false,
+  "note": "CMA/free RAM does not establish a contiguous 1+ GB DMA allocation; runtime design still required"
+}

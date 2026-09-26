@@ -1,0 +1,4 @@
+numpy>=1.24
+# Optional local simulator installation: pip install --target rtl/.tools -r requirements-rtl.txt
+# The third-party wrapper bundles upstream Verilator; no untrusted "iverilog" package.
+verilator==5.48.0

@@ -1,0 +1,843 @@
+{
+  "status": "projection_only_not_board_measured",
+  "model": "Qwen3-1.7B",
+  "config": {
+    "ddr_eff": 0.8,
+    "axi_ports": 4,
+    "axi_bits": 128,
+    "axi_mhz": 200,
+    "axi_eff": 0.85,
+    "vpu_mhz": 200,
+    "lanes": 128,
+    "page_bytes": 8192,
+    "fifo_pages": 8,
+    "spu_elems": 4,
+    "host_overhead_us": 100
+  },
+  "board": {
+    "name": "KV260 / K26",
+    "ddr_bytes": 4294967296,
+    "ddr_rate_mts": 2400,
+    "ddr_bus_bits": 64,
+    "lut": 117120,
+    "ff": 234240,
+    "bram36": 144,
+    "uram288": 64,
+    "dsp48e2": 1248
+  },
+  "main": {
+    "context_cached": 1024,
+    "lm_bits": 4,
+    "gqa_reuse": true,
+    "traffic_bytes": {
+      "layer_w": 704643072,
+      "layer_s": 22020096,
+      "zeros": 0,
+      "norms": 466944,
+      "lm_w": 155582464,
+      "lm_s": 4866048,
+      "kv_read": 59637760,
+      "kv_write": 58240,
+      "embed": 1056,
+      "total": 947275680
+    },
+    "macs_per_token": 1838006272,
+    "effective_gbs": 10.88,
+    "memory_floor_ms": 87.06577941176471,
+    "compute_floor_ms": 71.79712,
+    "roofline_tok_s": 11.485568805060002,
+    "analytical_tok_s": 11.472183773910631,
+    "image_bytes": 953638912,
+    "raw_ddr_headroom_bytes": 3341328384,
+    "onchip_payload_bytes": 265000,
+    "isa_scratch_bytes": 132096,
+    "isa_instruction_bytes": 7904,
+    "onchip_items": [
+      [
+        "ISA scratch（当前编译器，FP32）",
+        132096
+      ],
+      [
+        "ISA 指令存储（128 bit/条，若驻片上）",
+        7904
+      ],
+      [
+        "MMU 权重页 FIFO（候选）",
+        65536
+      ],
+      [
+        "S 页双缓冲（候选）",
+        16384
+      ],
+      [
+        "VPU 激活 BFP16 乒乓暂存（候选）",
+        24576
+      ],
+      [
+        "GQA 注意力概率 FP32（候选）",
+        8200
+      ],
+      [
+        "RoPE 查找表（候选）",
+        8192
+      ],
+      [
+        "KV 写回暂存（候选）",
+        2112
+      ]
+    ],
+    "required_gbs": {
+      "8": 7.57820544,
+      "10": 9.4727568
+    }
+  },
+  "cycle_simulation": {
+    "tok_s": 11.443744795650426,
+    "interval_ms": 87.3839829406265,
+    "ddr_util": 0.996418706995311,
+    "vpu_util": 0.8216791863193718,
+    "with_host_tok_s": 11.430663835672394
+  },
+  "cycle_n_tokens": 3,
+  "reserved_mib_assumption": 1024,
+  "sources": {
+    "memory": "https://docs.amd.com/r/en-US/ds987-k26-som/Functional-Overview-and-Block-Diagram",
+    "resources": "https://docs.amd.com/r/en-US/ds987-k26-som/Programmable-Logic",
+    "dsp": "https://docs.amd.com/v/u/en-US/ug579-ultrascale-dsp",
+    "ports": "https://arxiv.org/html/2507.03308v2#S2.SS3",
+    "board_flow": "https://docs.amd.com/r/en-US/ug1089-kv260-starter-kit/Vivado-Board-Flow"
+  },
+  "context_sweep": [
+    {
+      "context_cached": 0,
+      "lm_bits": 4,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 155582464,
+        "lm_s": 4866048,
+        "kv_read": 0,
+        "kv_write": 58240,
+        "embed": 1056,
+        "total": 887637920
+      },
+      "macs_per_token": 1720565760,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 81.58436764705883,
+      "compute_floor_ms": 67.2096,
+      "roofline_tok_s": 12.257250118381602,
+      "analytical_tok_s": 12.242007258271702,
+      "image_bytes": 894918656,
+      "raw_ddr_headroom_bytes": 3400048640,
+      "onchip_payload_bytes": 256808,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          8
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 7.10110336,
+        "10": 8.8763792
+      }
+    },
+    {
+      "context_cached": 512,
+      "lm_bits": 4,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 155582464,
+        "lm_s": 4866048,
+        "kv_read": 29818880,
+        "kv_write": 58240,
+        "embed": 1056,
+        "total": 917456800
+      },
+      "macs_per_token": 1779286016,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 84.32507352941177,
+      "compute_floor_ms": 69.50336,
+      "roofline_tok_s": 11.858868995248605,
+      "analytical_tok_s": 11.844600293372636,
+      "image_bytes": 924278784,
+      "raw_ddr_headroom_bytes": 3370688512,
+      "onchip_payload_bytes": 260904,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          4104
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 7.3396544,
+        "10": 9.174568
+      }
+    },
+    {
+      "context_cached": 1024,
+      "lm_bits": 4,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 155582464,
+        "lm_s": 4866048,
+        "kv_read": 59637760,
+        "kv_write": 58240,
+        "embed": 1056,
+        "total": 947275680
+      },
+      "macs_per_token": 1838006272,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 87.06577941176471,
+      "compute_floor_ms": 71.79712,
+      "roofline_tok_s": 11.485568805060002,
+      "analytical_tok_s": 11.472183773910631,
+      "image_bytes": 953638912,
+      "raw_ddr_headroom_bytes": 3341328384,
+      "onchip_payload_bytes": 265000,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          8200
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 7.57820544,
+        "10": 9.4727568
+      }
+    },
+    {
+      "context_cached": 2048,
+      "lm_bits": 4,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 155582464,
+        "lm_s": 4866048,
+        "kv_read": 119275520,
+        "kv_write": 58240,
+        "embed": 1056,
+        "total": 1006913440
+      },
+      "macs_per_token": 1955446784,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 92.54719117647059,
+      "compute_floor_ms": 76.38464,
+      "roofline_tok_s": 10.805298219080282,
+      "analytical_tok_s": 10.793450960615868,
+      "image_bytes": 1012359168,
+      "raw_ddr_headroom_bytes": 3282608128,
+      "onchip_payload_bytes": 273192,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          16392
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 8.05530752,
+        "10": 10.0691344
+      }
+    },
+    {
+      "context_cached": 4096,
+      "lm_bits": 4,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 155582464,
+        "lm_s": 4866048,
+        "kv_read": 238551040,
+        "kv_write": 58240,
+        "embed": 1056,
+        "total": 1126188960
+      },
+      "macs_per_token": 2190327808,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 103.51001470588236,
+      "compute_floor_ms": 85.55968,
+      "roofline_tok_s": 9.660900955733041,
+      "analytical_tok_s": 9.651429209753012,
+      "image_bytes": 1133469696,
+      "raw_ddr_headroom_bytes": 3161497600,
+      "onchip_payload_bytes": 289576,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          32776
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 9.00951168,
+        "10": 11.2618896
+      }
+    },
+    {
+      "context_cached": 0,
+      "lm_bits": 8,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 311164928,
+        "lm_s": 4866048,
+        "kv_read": 0,
+        "kv_write": 58240,
+        "embed": 2080,
+        "total": 1043221408
+      },
+      "macs_per_token": 1720565760,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 95.88432058823528,
+      "compute_floor_ms": 67.2096,
+      "roofline_tok_s": 10.429233829526627,
+      "analytical_tok_s": 10.418206671677376,
+      "image_bytes": 1050501120,
+      "raw_ddr_headroom_bytes": 3244466176,
+      "onchip_payload_bytes": 256808,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          8
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 8.345771264,
+        "10": 10.43221408
+      }
+    },
+    {
+      "context_cached": 512,
+      "lm_bits": 8,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 311164928,
+        "lm_s": 4866048,
+        "kv_read": 29818880,
+        "kv_write": 58240,
+        "embed": 2080,
+        "total": 1073040288
+      },
+      "macs_per_token": 1779286016,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 98.62502647058824,
+      "compute_floor_ms": 69.50336,
+      "roofline_tok_s": 10.139414262141852,
+      "analytical_tok_s": 10.12899115319613,
+      "image_bytes": 1079861248,
+      "raw_ddr_headroom_bytes": 3215106048,
+      "onchip_payload_bytes": 260904,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          4104
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 8.584322304,
+        "10": 10.73040288
+      }
+    },
+    {
+      "context_cached": 1024,
+      "lm_bits": 8,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 311164928,
+        "lm_s": 4866048,
+        "kv_read": 59637760,
+        "kv_write": 58240,
+        "embed": 2080,
+        "total": 1102859168
+      },
+      "macs_per_token": 1838006272,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 101.36573235294118,
+      "compute_floor_ms": 71.79712,
+      "roofline_tok_s": 9.865266858805311,
+      "analytical_tok_s": 9.855399491632987,
+      "image_bytes": 1109221376,
+      "raw_ddr_headroom_bytes": 3185745920,
+      "onchip_payload_bytes": 265000,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          8200
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 8.822873344,
+        "10": 11.02859168
+      }
+    },
+    {
+      "context_cached": 2048,
+      "lm_bits": 8,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 311164928,
+        "lm_s": 4866048,
+        "kv_read": 119275520,
+        "kv_write": 58240,
+        "embed": 2080,
+        "total": 1162496928
+      },
+      "macs_per_token": 1955446784,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 106.84714411764706,
+      "compute_floor_ms": 76.38464,
+      "roofline_tok_s": 9.359164517293245,
+      "analytical_tok_s": 9.350283145274206,
+      "image_bytes": 1167941632,
+      "raw_ddr_headroom_bytes": 3127025664,
+      "onchip_payload_bytes": 273192,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          16392
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 9.299975424,
+        "10": 11.62496928
+      }
+    },
+    {
+      "context_cached": 4096,
+      "lm_bits": 8,
+      "gqa_reuse": true,
+      "traffic_bytes": {
+        "layer_w": 704643072,
+        "layer_s": 22020096,
+        "zeros": 0,
+        "norms": 466944,
+        "lm_w": 311164928,
+        "lm_s": 4866048,
+        "kv_read": 238551040,
+        "kv_write": 58240,
+        "embed": 2080,
+        "total": 1281772448
+      },
+      "macs_per_token": 2190327808,
+      "effective_gbs": 10.88,
+      "memory_floor_ms": 117.80996764705883,
+      "compute_floor_ms": 85.55968,
+      "roofline_tok_s": 8.48824611340062,
+      "analytical_tok_s": 8.480940104827214,
+      "image_bytes": 1289052160,
+      "raw_ddr_headroom_bytes": 3005915136,
+      "onchip_payload_bytes": 289576,
+      "isa_scratch_bytes": 132096,
+      "isa_instruction_bytes": 7904,
+      "onchip_items": [
+        [
+          "ISA scratch（当前编译器，FP32）",
+          132096
+        ],
+        [
+          "ISA 指令存储（128 bit/条，若驻片上）",
+          7904
+        ],
+        [
+          "MMU 权重页 FIFO（候选）",
+          65536
+        ],
+        [
+          "S 页双缓冲（候选）",
+          16384
+        ],
+        [
+          "VPU 激活 BFP16 乒乓暂存（候选）",
+          24576
+        ],
+        [
+          "GQA 注意力概率 FP32（候选）",
+          32776
+        ],
+        [
+          "RoPE 查找表（候选）",
+          8192
+        ],
+        [
+          "KV 写回暂存（候选）",
+          2112
+        ]
+      ],
+      "required_gbs": {
+        "8": 10.254179584,
+        "10": 12.81772448
+      }
+    }
+  ],
+  "topology_sweep": [
+    {
+      "ports": 1,
+      "axi_mhz": 200,
+      "axi_peak_gbs": 3.2,
+      "effective_gbs": 2.72,
+      "tok_s": 2.8705573043140755
+    },
+    {
+      "ports": 1,
+      "axi_mhz": 300,
+      "axi_peak_gbs": 4.8,
+      "effective_gbs": 4.08,
+      "tok_s": 4.305207658196578
+    },
+    {
+      "ports": 2,
+      "axi_mhz": 200,
+      "axi_peak_gbs": 6.4,
+      "effective_gbs": 5.44,
+      "tok_s": 5.739439391006859
+    },
+    {
+      "ports": 2,
+      "axi_mhz": 300,
+      "axi_peak_gbs": 9.6,
+      "effective_gbs": 8.16,
+      "tok_s": 8.606647726101397
+    },
+    {
+      "ports": 4,
+      "axi_mhz": 200,
+      "axi_peak_gbs": 12.8,
+      "effective_gbs": 10.88,
+      "tok_s": 11.472183773910631
+    },
+    {
+      "ports": 4,
+      "axi_mhz": 300,
+      "axi_peak_gbs": 19.2,
+      "effective_gbs": 15.36,
+      "tok_s": 13.89253181945488
+    }
+  ],
+  "ddr_eff_sweep": [
+    {
+      "ddr_eff": 0.5,
+      "effective_gbs": 9.6,
+      "tok_s": 10.123904441680844
+    },
+    {
+      "ddr_eff": 0.6,
+      "effective_gbs": 10.88,
+      "tok_s": 11.472183773910631
+    },
+    {
+      "ddr_eff": 0.7,
+      "effective_gbs": 10.88,
+      "tok_s": 11.472183773910631
+    },
+    {
+      "ddr_eff": 0.8,
+      "effective_gbs": 10.88,
+      "tok_s": 11.472183773910631
+    },
+    {
+      "ddr_eff": 0.9,
+      "effective_gbs": 10.88,
+      "tok_s": 11.472183773910631
+    }
+  ]
+}

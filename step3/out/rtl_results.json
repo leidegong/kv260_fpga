@@ -1,0 +1,83 @@
+{
+  "status": "PASS",
+  "simulator": "D:\\new_test_claude\\edgeai\\step3\\rtl\\.tools\\verilator\\bin\\verilator_bin.exe",
+  "seed": 12345,
+  "elapsed_s": 96.21,
+  "tests": [
+    {
+      "module": "w4a16_dot",
+      "lanes": 1,
+      "groups": 257,
+      "report": "PASS dot lanes=1 groups=257 cycles=44731 stalled=901 blocked_result_reset=1"
+    },
+    {
+      "module": "w4a16_dot",
+      "lanes": 8,
+      "groups": 257,
+      "report": "PASS dot lanes=8 groups=257 cycles=6395 stalled=867 blocked_result_reset=1"
+    },
+    {
+      "module": "w4a16_dot",
+      "lanes": 32,
+      "groups": 257,
+      "report": "PASS dot lanes=32 groups=257 cycles=1779 stalled=416 blocked_result_reset=1"
+    },
+    {
+      "module": "w4a16_dot",
+      "lanes": 128,
+      "groups": 257,
+      "report": "PASS dot lanes=128 groups=257 cycles=500 stalled=179 blocked_result_reset=1"
+    },
+    {
+      "module": "page_demux",
+      "page_bytes": 8192,
+      "data_w": 512,
+      "groups": [
+        0,
+        1,
+        127,
+        128,
+        129,
+        4095,
+        4096,
+        4097,
+        8209
+      ],
+      "report": "PASS page width=512 jobs=9 cycles=47810 stalls=513,16794,25 payload_resets=2"
+    },
+    {
+      "module": "page_demux",
+      "page_bytes": 8192,
+      "data_w": 128,
+      "groups": [
+        0,
+        1,
+        127,
+        128,
+        129,
+        4095,
+        4096,
+        4097,
+        8209
+      ],
+      "report": "PASS page width=128 jobs=9 cycles=190744 stalls=1828,67445,40 payload_resets=2"
+    },
+    {
+      "module": "page_demux",
+      "page_bytes": 4096,
+      "data_w": 64,
+      "groups": [
+        0,
+        1,
+        63,
+        64,
+        65,
+        2047,
+        2048,
+        2049,
+        4113
+      ],
+      "report": "PASS page width=64 jobs=9 cycles=190805 stalls=1876,67324,21 payload_resets=2"
+    }
+  ]
+}

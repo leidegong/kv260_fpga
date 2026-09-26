@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.tools/
+.build/
+step3/build/
+step3/checkpoints/
+step3/bundles/
+*.vcd
+*.jou
+*.log

@@ -1,0 +1,51 @@
+{
+  "mode": "software_emulation_teacher_forced",
+  "hardware_measured": false,
+  "quantizer": "symmetric_groupwise_RTN",
+  "source": {
+    "kind": "synthetic",
+    "seed": 42
+  },
+  "reference_compared": false,
+  "tokens": 3,
+  "rows": [
+    {
+      "pos": 0,
+      "input_token": 1,
+      "predicted_token": 1,
+      "top5": [
+        1,
+        858,
+        872,
+        464,
+        710
+      ]
+    },
+    {
+      "pos": 1,
+      "input_token": 17,
+      "predicted_token": 17,
+      "top5": [
+        17,
+        886,
+        6,
+        136,
+        882
+      ]
+    },
+    {
+      "pos": 2,
+      "input_token": 42,
+      "predicted_token": 42,
+      "top5": [
+        42,
+        584,
+        671,
+        318,
+        956
+      ]
+    }
+  ],
+  "logical_ddr_bytes": 5465628,
+  "note": "RTN + numeric/KV error combined; no FPGA speed or task-quality claim"
+}
