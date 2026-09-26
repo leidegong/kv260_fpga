@@ -1,4 +1,4 @@
-"""Build actual Verilated RTL and check it against NumPy/DDR packer vectors.
+"""Build actual Verilated RTL and check it against NumPy, the DDR packer and split_read.
 
 Run: python run_rtl_tests.py [--quick] [--seed 12345]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
@@ -9,6 +9,7 @@ logs and results remain in rtl/.build; failure exits nonzero (never skips RTL).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,6 +22,7 @@ import time
 import numpy as np
 
 from ddr_pager import StreamLayout, pack_stream
+from kv260.axi_plan import split_read
 
 BASE = Path(__file__).resolve().parent
 RTL = BASE / "rtl"
@@ -105,7 +107,7 @@ def compiler_environment():
 
 
 def build(top, parameters, harness, defines, simulator, root, compiler, env):
-    suffix = "_".join(f"{key}{value}" for key, value in parameters.items())
+    suffix = "_".join(f"{key}{value}" for key, value in parameters.items()) or "default"
     directory = BUILD / f"{top}_{suffix}"
     directory.mkdir(parents=True, exist_ok=True)
     local_env = env.copy()
@@ -221,9 +223,263 @@ def test_page(page, width, seed, toolchain):
     return {"module": "page_demux", "page_bytes": page, "data_w": width, "groups": counts, "report": report}
 
 
+def reference_accum(products, scale_bits, exps):
+    """VPU.gemv group reduction: f32(f32(P) * (f32(fp16) * f32(2^e))), sequential."""
+    products = np.asarray(products, dtype=np.int64)
+    scale_bits = np.asarray(scale_bits, dtype=np.uint16)
+    exps = np.asarray(exps, dtype=np.int64)
+    if products.size == 0:
+        return np.uint32(0)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        power = np.ldexp(np.float32(1.0), exps).astype(np.float32)
+        factor = (scale_bits.view(np.float16).astype(np.float32) * power).astype(np.float32)
+        term = (products.astype(np.float32) * factor).astype(np.float32)
+        acc = np.float32(term[0])
+        for value in term[1:]:
+            acc = np.float32(acc + value)
+    return np.asarray(acc, dtype=np.float32).view(np.uint32)
+
+
+def expected_accum(products, scale_bits, exps):
+    """Finite/inf bits match NumPy. NaN results are the canonical qNaN, not host libm."""
+    bits = np.asarray(reference_accum(products, scale_bits, exps), dtype=np.uint32)
+    if np.isnan(bits.view(np.float32)):
+        return np.uint32(0x7FC00000)
+    return bits
+
+
+def test_scale(seed, toolchain):
+    directory, binary, env = build("scale_accum", {}, "scale_main.cpp", {}, *toolchain)
+    rng = np.random.default_rng(seed)
+    jobs = []
+
+    def add(products, scales, exps):
+        jobs.append((
+            np.asarray(products, dtype=np.int64),
+            np.asarray(scales, dtype=np.uint16),
+            np.asarray(exps, dtype=np.int64),
+        ))
+
+    add([], [], [])
+    add([0], [0x3C00], [0])
+    add([1], [0x3C00], [0])
+    add([16777217], [0x3C00], [0])
+    add([-2147483648], [0x3C00], [0])
+    add([3], [0x0001], [0])
+    add([1], [0x3C00], [127])
+    add([1], [0x3C00], [128])
+    add([0], [0x3C00], [200])
+    add([1], [0x3C00], [-149])
+    add([1], [0x3C00], [-200])
+    add([1, -1], [0x3C00, 0x3C00], [200, 200])
+    add([100000, -100000], [0x3C00, 0x3C00], [0, 0])
+    add([-1, 0], [0x0000, 0x3C00], [0, 0])
+    add([1 << 24, 1, -(1 << 24)], [0x3C00, 0x3C00, 0x3C00], [0, 0, 0])
+    add([1] * 64, [0x3C00] * 64, [0] * 64)
+    add([1], [0x7E00], [0])
+    add([1], [0x7C00], [0])
+    add([-4], [0xBC00], [1])
+    for _ in range(40):
+        groups = int(rng.integers(1, 17))
+        if rng.random() < 0.5:
+            products = rng.integers(-(1 << 25), 1 << 25, size=groups)
+        else:
+            products = rng.integers(-2147483648, 2147483647, size=groups)
+        magnitude = rng.integers(0, 0x7C00, size=groups, dtype=np.uint32)
+        sign = rng.integers(0, 2, size=groups, dtype=np.uint32) << 15
+        exps = rng.integers(-40, 40, size=groups)
+        add(products, (magnitude + sign).astype(np.uint16), exps)
+    add(rng.integers(-1000, 1000, size=8),
+        rng.integers(0, 0x7C00, size=8, dtype=np.uint16),
+        rng.integers(-180, 160, size=8))
+
+    # One real software GEMV shape: RTL must match both the formula and VPU.gemv.
+    from accel_golden import AccelCfg, Decoded, VPU, bfp_quant
+    rows, groups, group = 3, 8, 128
+    activation = rng.normal(size=(groups * group,)).astype(np.float32)
+    activation[0] = np.float32(1e-6)
+    activation[1] = np.float32(50.0)
+    raw = rng.integers(0, 16, size=(rows, groups * group), dtype=np.uint8)
+    scale_bits = rng.integers(1, 0x7800, size=(rows, groups), dtype=np.uint16)
+    weights = Decoded(raw, scale_bits.view(np.float16), 4, group)
+    golden = VPU(AccelCfg()).gemv(weights, activation)
+    mantissa, exponent = bfp_quant(activation, 16, group)
+    if int(np.max(np.abs(exponent))) >= 32768:
+        raise AssertionError("BFP exponent does not fit the signed 16-bit RTL port")
+    for row in range(rows):
+        products = np.array([
+            int(weights.q[row, g].astype(np.int64) @ mantissa[g].astype(np.int64))
+            for g in range(groups)
+        ], dtype=np.int64)
+        formula = int(reference_accum(products, scale_bits[row], exponent))
+        vpu_bits = int(np.asarray(golden[row], dtype=np.float32).view(np.uint32))
+        if formula != vpu_bits:
+            raise AssertionError(f"VPU.gemv diverged from the FP32 formula on row {row}")
+        add(products, scale_bits[row], exponent)
+
+    expected = []
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(jobs)}\n")
+        for products, scales, exps in jobs:
+            out.write(f"{len(products)}\n")
+            for product, scale, exp in zip(products, scales, exps):
+                if not -32768 <= int(exp) <= 32767:
+                    raise AssertionError(f"exponent {int(exp)} does not fit int16")
+                out.write(f"{int(product) & 0xFFFFFFFF:x} {int(scale) & 0xFFFF:04x} {int(exp)}\n")
+            expected.append(int(expected_accum(products, scales, exps)))
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    actual = [int(line, 16) for line in results.read_text().split() if line.strip()]
+    if len(actual) != len(expected):
+        raise AssertionError(f"scale result count {len(actual)} != {len(expected)}")
+    for index, (got, want) in enumerate(zip(actual, expected)):
+        if got != want:
+            raise AssertionError(f"scale job {index}: rtl {got:08x} expected {want:08x}")
+    print(report, flush=True)
+    return {"module": "scale_accum", "jobs": len(jobs), "report": report}
+
+
+def axi_byte(addr):
+    return ((addr * 131 + 17) ^ (addr >> 8)) & 0xFF
+
+
+def test_axi(data_w, max_beats, seed, toolchain):
+    beat = data_w // 8
+    directory, binary, env = build(
+        "axi_read_master",
+        {"ADDR_W": 49, "DATA_W": data_w, "MAX_BEATS": max_beats},
+        "axi_main.cpp", {"DATA_W": data_w}, *toolchain)
+    address_bits = 49
+    top = (1 << address_bits) - beat
+    cases = [
+        (0, 8192, 0),
+        (4096 - beat, beat * 2, 0),
+        (0x100000010, 4096, 0),
+        (0, 0, 0),
+        (1, beat, 0),
+        (top, beat * 2, 0),
+        (top, beat, 0),
+        (0, 8192, 1),
+    ]
+    if max_beats < 256:
+        cases.append((128, 8192, 0))
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"{len(cases)}\n")
+        for addr, nbytes, err in cases:
+            out.write(f"{addr:x} {nbytes} {err}\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    blocks = []
+    current = None
+    for line in results.read_text().splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "CASE":
+            current = {"ar": [], "beats": [], "lasts": [], "resp": None}
+            blocks.append(current)
+        elif parts[0] == "AR":
+            current["ar"].append((int(parts[1], 16), int(parts[2]), int(parts[3]), int(parts[4])))
+        elif parts[0] == "BEAT":
+            current["beats"].append(int(parts[1], 16))
+            current["lasts"].append(int(parts[2]))
+        elif parts[0] == "DONE":
+            current["resp"] = int(parts[1])
+    if len(blocks) != len(cases):
+        raise AssertionError(f"axi case count {len(blocks)} != {len(cases)}")
+    for case, block in zip(cases, blocks):
+        addr, nbytes, err = case
+        try:
+            bursts = split_read(addr, nbytes, beat, max_beats, address_bits)
+        except ValueError:
+            bursts = None
+        if bursts is None:
+            if block["ar"] or block["beats"] or block["resp"] != 2:
+                raise AssertionError(f"illegal AXI command was not rejected locally: {case} resp={block['resp']}")
+            continue
+        expect = bursts[:1] if err else bursts
+        if len(block["ar"]) != len(expect):
+            raise AssertionError(f"AR count {len(block['ar'])} != {len(expect)} for {case}")
+        for seen, burst in zip(block["ar"], expect):
+            wanted = (burst.address, burst.beats, burst.beat_bytes, 1)
+            if seen != wanted:
+                raise AssertionError(f"AR {seen} != {wanted}")
+            size = burst.beats * burst.beat_bytes
+            if burst.address // 4096 != (burst.address + size - 1) // 4096:
+                raise AssertionError(f"burst crosses 4KiB: {wanted}")
+        raw = bytearray()
+        for word in block["beats"]:
+            for lane in range(beat):
+                raw.append((word >> (8 * lane)) & 0xFF)
+        length = sum(burst.beats * burst.beat_bytes for burst in expect)
+        wanted_bytes = bytes(axi_byte(addr + offset) for offset in range(length))
+        if bytes(raw) != wanted_bytes:
+            raise AssertionError(f"AXI payload mismatch for {case}: {len(raw)} bytes vs {length}")
+        if block["resp"] != (2 if err else 0):
+            raise AssertionError(f"AXI resp {block['resp']} for {case}")
+        if not block["lasts"] or block["lasts"][-1] != 1 or any(flag == 1 for flag in block["lasts"][:-1]):
+            raise AssertionError(f"m_last sequence invalid for {case}")
+    print(report, flush=True)
+    return {"module": "axi_read_master", "data_w": data_w, "max_beats": max_beats,
+            "cases": len(cases), "report": report}
+
+
+def write_rtl_report(summary):
+    out = BASE / "out"
+    out.mkdir(exist_ok=True)
+    (out / "rtl_results.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    lines = [
+        f"# RTL verification — {time.strftime('%Y-%m-%d')}",
+        "",
+        "Status: PASS. Actual Verilator RTL simulation; no Vivado synthesis, implementation or board test.",
+        "",
+        f"Seed: {summary['seed']}; duration: {summary['elapsed_s']} s.",
+        "",
+        "| Module | Configuration | Result |",
+        "|---|---|---|",
+    ]
+    for test in summary["tests"]:
+        module = test["module"]
+        if module == "w4a16_dot":
+            config = f"LANES={test['lanes']}"
+        elif module == "page_demux":
+            config = f"PAGE={test['page_bytes']}, DATA_W={test['data_w']}"
+        elif module == "scale_accum":
+            config = f"jobs={test['jobs']}"
+        else:
+            config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
+        lines.append(f"| {module} | {config} | {test['report']} |")
+    lines.extend([
+        "",
+        "Dot results compare to NumPy exact INT64 sums. Page payload compares to original weights/scales packed through ddr_pager; poisoned padding must be discarded.",
+        "",
+        "scale_accum finite values and infinities are bit-exact (0 ULP) with `VPU.gemv`: `f32(f32(P) * (f32(fp16 scale) * f32(2^e)))`, then a sequential roundTiesToEven FP32 add. The first group is copied, not added to +0. NaN results from invalid operations or NaN inputs are canonical `0x7fc00000` and are not required to match host libm NaN sign/payload.",
+        "",
+        "axi_read_master descriptors match `kv260.axi_plan.split_read` (4 KiB boundary and MAX_BEATS, outstanding 1). Beats are little-endian. Illegal descriptors complete with SLVERR and no AR. A nonzero RRESP drains the current burst and does not issue another. No board address map is claimed.",
+        "",
+        "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
+        "",
+        "Reproduce from step3: `python3 run_rtl_tests.py`.",
+        "",
+        "## Verified source hashes",
+        "",
+    ])
+    for rel in (
+        "rtl/w4a16_dot.sv", "rtl/page_demux.sv", "rtl/scale_accum.sv", "rtl/axi_read_master.sv",
+        "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/axi_main.cpp",
+        "rtl/tb/sim_common.h", "run_rtl_tests.py",
+    ):
+        digest = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
+        lines.append(f"- `{rel}`: `{digest}`")
+    lines.append("")
+    (out / "rtl_report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="only default LANES=32/page8192 width512")
+    parser.add_argument("--quick", action="store_true", help="default dot/page plus scale_accum and one AXI master")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -236,9 +492,13 @@ def main():
     reports = [test_dot(n, args.seed, toolchain) for n in ([32] if args.quick else [1, 8, 32, 128])]
     reports += [test_page(p, w, args.seed, toolchain) for p, w in
                 ([(8192, 512)] if args.quick else [(8192, 512), (8192, 128), (4096, 64)])]
+    reports.append(test_scale(args.seed, toolchain))
+    axi_cfgs = [(128, 256)] if args.quick else [(128, 256), (128, 16), (64, 256), (32, 16)]
+    reports += [test_axi(width, beats, args.seed, toolchain) for width, beats in axi_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
                "elapsed_s": round(time.perf_counter()-start, 2), "tests": reports}
     (BUILD / "summary.json").write_text(json.dumps(summary, indent=2)+"\n", encoding="utf-8")
+    write_rtl_report(summary)
     print(f"All {len(reports)} RTL configurations PASS ({summary['elapsed_s']}s).")
 
 

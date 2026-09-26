@@ -1,8 +1,8 @@
-# RTL verification — 2026-09-25
+# RTL verification — 2026-09-26
 
 Status: PASS. Actual Verilator RTL simulation; no Vivado synthesis, implementation or board test.
 
-Seed: 12345; duration: 96.21 s. Verilator 5.48.0 + local MSVC x64.
+Seed: 12345; duration: 129.88 s.
 
 | Module | Configuration | Result |
 |---|---|---|
@@ -13,10 +13,19 @@ Seed: 12345; duration: 96.21 s. Verilator 5.48.0 + local MSVC x64.
 | page_demux | PAGE=8192, DATA_W=512 | PASS page width=512 jobs=9 cycles=47810 stalls=513,16794,25 payload_resets=2 |
 | page_demux | PAGE=8192, DATA_W=128 | PASS page width=128 jobs=9 cycles=190744 stalls=1828,67445,40 payload_resets=2 |
 | page_demux | PAGE=4096, DATA_W=64 | PASS page width=64 jobs=9 cycles=190805 stalls=1876,67324,21 payload_resets=2 |
+| scale_accum | jobs=63 | PASS scale jobs=63 cycles=1050 stalled=248 blocked_result_reset=1 partial_reset=1 |
+| axi_read_master | DATA_W=128, MAX_BEATS=256, cases=8 | PASS axi data_w=128 cases=8 cycles=3240 ar_stalls=16 out_stalls=2054 resets=8 |
+| axi_read_master | DATA_W=128, MAX_BEATS=16, cases=9 | PASS axi data_w=128 cases=9 cycles=4263 ar_stalls=172 out_stalls=2598 resets=9 |
+| axi_read_master | DATA_W=64, MAX_BEATS=256, cases=8 | PASS axi data_w=64 cases=8 cycles=5609 ar_stalls=22 out_stalls=3590 resets=8 |
+| axi_read_master | DATA_W=32, MAX_BEATS=16, cases=9 | PASS axi data_w=32 cases=9 cycles=16687 ar_stalls=650 out_stalls=10278 resets=9 |
 
 Dot results compare to NumPy exact INT64 sums. Page payload compares to original weights/scales packed through ddr_pager; poisoned padding must be discarded.
 
-Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page/block tails, reset during scale/weight payload and reset while a completed dot result is stalled.
+scale_accum finite values and infinities are bit-exact (0 ULP) with `VPU.gemv`: `f32(f32(P) * (f32(fp16 scale) * f32(2^e)))`, then a sequential roundTiesToEven FP32 add. The first group is copied, not added to +0. NaN results from invalid operations or NaN inputs are canonical `0x7fc00000` and are not required to match host libm NaN sign/payload.
+
+axi_read_master descriptors match `kv260.axi_plan.split_read` (4 KiB boundary and MAX_BEATS, outstanding 1). Beats are little-endian. Illegal descriptors complete with SLVERR and no AR. A nonzero RRESP drains the current burst and does not issue another. No board address map is claimed.
+
+Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.
 
 Reproduce from step3: `python3 run_rtl_tests.py`.
 
@@ -24,6 +33,11 @@ Reproduce from step3: `python3 run_rtl_tests.py`.
 
 - `rtl/w4a16_dot.sv`: `179d3d0a68dd52e54cb5c69d1236272918c0741ac8d9f6c4dc8755bb284433bc`
 - `rtl/page_demux.sv`: `a882e5012de0aaf24816bbb3a363fdcd376b626e1ef4044daff8729b8da094d6`
+- `rtl/scale_accum.sv`: `a9d8638933d9285c2abe425bc885b5a8a26d1570b999f4e74b9457dad3d924a6`
+- `rtl/axi_read_master.sv`: `e228c9531dd3e2db1cf4432f68e7bf4a3cd47a7bd676c51f4b4af56537358266`
 - `rtl/tb/dot_main.cpp`: `b95e8f71a280259cbbbcd69647a0712d80aae26ab5a1555d5a5973dda5e3a741`
 - `rtl/tb/page_main.cpp`: `f242c4debacf2965aa8ef15bf479db35248528968bc2574ebb6c1f9b24da97a4`
-- `run_rtl_tests.py`: `5d297ad7f8d9eea87776da3f5b34cb4fd4bd2aab35b319eec2ae75d18eea430e`
+- `rtl/tb/scale_main.cpp`: `1c9ab21234bb724643841c29d3fb84bf3695d5f28918ca5e38d136e752426321`
+- `rtl/tb/axi_main.cpp`: `db70b36825b38e4f6d4ae38fae218e26610a4d07d3faded0ec18a159a4315d75`
+- `rtl/tb/sim_common.h`: `2886d974f5fc65e8b4ebd0ff69a10547c6c56bff7934beed0d5f5e115055b14c`
+- `run_rtl_tests.py`: `9dfd1dc97fb9d27b060adc453e43b1417349cc12f74336069def2a8031ea73ba`

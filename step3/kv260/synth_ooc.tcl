@@ -8,7 +8,7 @@ if {[llength [get_parts -quiet $part]] != 1} {
     error "K26 part unavailable: install Kria/Zynq UltraScale+ device support for $part"
 }
 file mkdir $out
-foreach top {w4a16_dot page_demux} {
+foreach top {w4a16_dot page_demux scale_accum axi_read_master} {
     create_project -in_memory -part $part
     read_verilog -sv [file join $root rtl ${top}.sv]
     synth_design -top $top -part $part -mode out_of_context
@@ -21,5 +21,7 @@ foreach top {w4a16_dot page_demux} {
 set fp [open [file join $out scope.txt] w]
 puts $fp "Vivado [version -short]; target $part; requested clock 200 MHz."
 puts $fp "Leaf synthesis only. IO paths are not constrained as a board interface."
-puts $fp "No place/route, timing closure, AXI subsystem, SPU/DCU RTL, or bitstream."
+puts $fp "scale_accum is a combinational numeric leaf, not a 200 MHz FP pipeline."
+puts $fp "axi_read_master is an outstanding-1 read splitter, not a DMA or HP subsystem."
+puts $fp "No place/route, timing closure, PS integration, SPU/DCU RTL, or bitstream."
 close $fp

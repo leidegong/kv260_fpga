@@ -2,7 +2,7 @@
 
 目标：VPU / SPU / MMU + DDR 权重分页，batch=1、1024上下文持续解码8–10 tokens/s。
 
-**当前是可运行的软件样机、模型导出链路和经过仿真的首批RTL；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。SPU/DCU RTL、AXI读写/重排、KV硬件调度、PS/PL集成和驱动仍需实现；没有bitstream、完整真实checkpoint质量结果或板测速度。
+**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。SPU/DCU RTL、AXI写通道与多口重排、KV硬件调度、PS/PL集成和驱动仍需实现；没有bitstream、完整真实checkpoint质量结果或板测速度。
 
 实施规格见 [KV260 v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md)。P3 v0.1及旧P3性能报告保留作历史分析，不能用作KV260部署配置。新平台预算见 [KV260报告](out/kv260_report.md)。
 
@@ -55,23 +55,25 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 
 ## 5. RTL仿真与综合
 
-已新增两个独立核心：
+已仿真的独立叶模块：
 
 | 核心 | 已实现 | 尚不包含 |
 |---|---|---|
 | `rtl/page_demux.sv` | W4/g128 S/W页分流、尾页padding剔除、ready/valid反压 | AXI主机、乱序重排、scale缓存、W8模式 |
-| `rtl/w4a16_dot.sv` | 128元素组内精确整数点积，LANES可配置 | BFP量化、scale恢复、组间FP32累加、完整矩阵调度 |
+| `rtl/w4a16_dot.sv` | 128元素组内精确整数点积，LANES可配置 | BFP量化、完整矩阵调度 |
+| `rtl/scale_accum.sv` | INT32组积 × FP16 scale × 2^e，再按组做FP32累加 | BFP量化器、多行调度、200 MHz流水 |
+| `rtl/axi_read_master.sv` | 按4 KiB/MAX_BEATS拆分的outstanding=1 AXI4读 | 写通道、多口重排、驱动、地址转换 |
 
-A16表示有符号整数尾数，**不是IEEE FP16**。默认32路dot只用于首批功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。
+A16表示有符号整数尾数，**不是IEEE FP16**。`scale_accum`的有限结果与`VPU.gemv`的FP32公式逐位一致（0 ULP）；NaN规范为`0x7fc00000`，不要求与主机libm的NaN位型相同。默认32路dot只用于功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。AXI读主机不是HP口驱动，也没有寄存器地址。
 
 ```bash
 python3 -m pip install --target rtl/.tools -r requirements-rtl.txt
 python3 run_rtl_tests.py
 ```
 
-使用实际Verilator仿真RTL，再与NumPy和现有页打包器比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。当前机器的Verilator已局部安装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
+使用实际Verilator仿真RTL，再与NumPy、现有页打包器和`split_read`比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。Verilator可以装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
 
-完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，含随机停顿、结果反压、复位、极值与尾页。`--quick`仅运行默认两种配置。数值规范中的SPU浮点运算仍须独立验证，当前RTL测试不覆盖完整模型。
+完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，`scale_accum`，以及AXI数据宽度128/64/32和不同MAX_BEATS。含随机停顿、结果反压、复位、极值与尾页。`--quick`运行默认dot/page、scale累加和一种AXI配置。SPU的exp/rsqrt仍没有RTL。
 
 安装Vivado的K26器件支持后可运行：
 
@@ -79,7 +81,7 @@ python3 run_rtl_tests.py
 vivado -mode batch -source kv260/synth_ooc.tcl
 ```
 
-该脚本只做两核心的out-of-context综合，输出资源/综合时序报告至 `build/synth_ooc`。此处尚未运行Vivado；脚本不生成bitstream，报告也不等于布局布线时序收敛。
+该脚本只做这几个叶模块的out-of-context综合，输出资源/综合时序报告至 `build/synth_ooc`。此处尚未运行Vivado；脚本不生成bitstream，报告也不等于布局布线时序收敛。`scale_accum`的面积不能当成200 MHz浮点单元的资源评估。
 
 ## 6. 板卡准备好之后
 
@@ -103,6 +105,6 @@ python3 board_probe.py --out board_probe.json
 | `export_kv260.py` / `run_bundle.py` | 可校验软件部署包、无副作用镜像执行及精度对照 |
 | `platforms.py` / `kv260_report.py` | KV260端口、计算及存储预算；预测非板测 |
 | `kv260/axi_plan.py` / `board_probe.py` | AXI契约、只读板卡信息 |
-| `rtl/` / `run_rtl_tests.py` | 首批可综合核心与真实RTL仿真 |
+| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、AXI读拆分，以及真实RTL仿真 |
 
-本次软件回归24项通过，1项Torch/CUDA对照因未安装而跳过；bundle/AXI回归8/8通过，平台预算回归9/9通过。RTL矩阵7/7通过，结果见 [RTL报告](out/rtl_report.md)；全部验证汇总见 [验证记录](out/validation_report.md)。实际部署的剩余工作及各阶段通过条件见KV260实施规格。
+软件回归、unittest和RTL的当次结果见 [验证记录](out/validation_report.md)。实际部署的剩余工作见 [路线图](../docs/ROADMAP.md)。
