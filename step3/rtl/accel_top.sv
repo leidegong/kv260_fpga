@@ -10,6 +10,7 @@ module accel_top #(
     parameter int SCRATCH_WORDS = 65536,
     parameter int PROG_WORDS = 1024,
     parameter int MAX_CTX = 4096,
+    parameter int MAX_VEC = 8192,
     parameter int TIMEOUT = 1 << 20
 ) (
     input  logic                         clk,
@@ -62,7 +63,9 @@ module accel_top #(
     input  logic [1:0]                   m_axi_bresp,
     // simulation/debug visibility of lm_head outputs
     output logic                         dbg_logit_valid,
-    output logic [31:0]                  dbg_logit
+    output logic [31:0]                  dbg_logit,
+    output logic                         dbg_busy,
+    output logic [15:0]                  dbg_pc
 );
     import kv260_regs_pkg::*;
     localparam int W_BYTES = NPORTS * 16;
@@ -124,7 +127,7 @@ module accel_top #(
     );
 
     accel_core #(.W_BYTES(W_BYTES), .ADDR_W(ADDR_W), .SCRATCH_WORDS(SCRATCH_WORDS),
-                 .PROG_WORDS(PROG_WORDS), .MAX_CTX(MAX_CTX)) core (
+                 .PROG_WORDS(PROG_WORDS), .MAX_CTX(MAX_CTX), .MAX_VEC(MAX_VEC)) core (
         .clk, .rst_n(core_rst_n),
         .start, .image_base(ADDR_W'({base_hi, base_lo})), .prog_len(16'(prog_len)), .token, .pos,
         .attn_scale, .busy, .done, .err_code, .err_pc, .result, .cycles,
@@ -134,8 +137,9 @@ module accel_top #(
         .rd_last, .rd_error,
         .wr_cmd_valid, .wr_cmd_ready, .wr_cmd_addr, .wr_cmd_bytes, .wr_valid, .wr_ready, .wr_data,
         .wr_busy, .wr_error,
-        .dbg_logit_valid, .dbg_logit
+        .dbg_logit_valid, .dbg_logit, .dbg_pc
     );
+    assign dbg_busy = busy;
 
     always_comb begin
         case (reg_raddr)

@@ -9,6 +9,7 @@
 6. DCU: the binary program reproduces VirtualAccel bit for bit; batched prefill gives exactly
    the logits and KV cache of token-by-token decode.
 7. Cycle simulation agrees with the analytic model; DDR4 mechanism model sanity checks.
+8. SPU numerics v0.2: exp_hw error budget and its effect versus NumPy exp (v0.1).
 """
 import os
 import json
@@ -321,6 +322,25 @@ def test_safetensors_reader():
         check("safetensors rejects truncated tensors and packed quantized checkpoints", truncated and rejects(lambda: SafeTensors([file])))
 
 
+def test_spu_numerics():
+    from spu_numerics import accuracy_report
+    acc = accuracy_report(n=300_000)
+    check("exp_hw (RTL-exact exp) max error < 1 ULP on normal results", acc["hw_max_ulp"] < 1.0,
+          f"max {acc['hw_max_ulp']:.3f} ULP, mean {acc['hw_mean_ulp']:.3f}; this CPU's np.exp max {acc['numpy_max_ulp']:.3f}")
+    img = build_image(TINY, random_weights(TINY, seed=7), QuantCfg(page=4096, ctx_max=16))
+    img2 = build_image(TINY, random_weights(TINY, seed=7), QuantCfg(page=4096, ctx_max=16))
+    hw, npx = VirtualAccel(img, AccelCfg(exp="hw")), VirtualAccel(img2, AccelCfg(exp="numpy"))
+    errs, same = [], True
+    for pos, tok in enumerate([3, 99, 512, 7, 800, 41]):
+        a, b = hw.step(tok, pos), npx.step(tok, pos)
+        errs.append(rel(a, b))
+        same &= int(np.argmax(a)) == int(np.argmax(b))
+    # Differences propagate through INT8 KV and BFP rounding; judge them against the KV8
+    # format error of this model (about 5e-3, see the error breakdown below).
+    check("numerics v0.2 (exp_hw) vs v0.1 (np.exp): logit change < 1e-3 (1/5 of KV8 format error), same argmax",
+          max(errs) < 1e-3 and same, f"max rel {max(errs):.1e}")
+
+
 def main():
     t0 = time.time()
     test_pager()
@@ -332,6 +352,7 @@ def main():
     test_timing_models()
     test_input_validation()
     test_safetensors_reader()
+    test_spu_numerics()
     print("\nError breakdown on the tiny random model (mean relative L2 error of logits):")
     for tag, e, top1, tok in lines:
         print(f"  accel [{tag}] vs FP32 ref (same W4 weights, same KV format): {e:.2e}  top-1 agree {top1 * 100:.0f}%  traffic==plan {tok}")

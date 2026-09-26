@@ -39,6 +39,9 @@ int main(int argc, char** argv) {
         std::deque<WBurst> aw; std::deque<uint64_t> b;
         uint64_t now = 0;
         std::vector<uint32_t> logits;
+        std::vector<uint64_t> pc_cycles(65536);
+        bool ideal = std::getenv("ACCEL_IDEAL_MEMORY") != nullptr;   // no bubbles: throughput runs
+        for (auto& p : ports) p.ideal = ideal;
         auto tick = [&] {
             std::array<bool, N> rv{};
             for (int p = 0; p < N; ++p) {
@@ -50,8 +53,8 @@ int main(int argc, char** argv) {
                 set_bits(d.m_axi_rresp, p * 2, 2, resp);
                 set_bits(d.m_axi_rlast, p, 1, last);
             }
-            d.m_axi_awready = aw.size() < 4 && random_word(rng) % 3 != 0;
-            d.m_axi_wready = !aw.empty() && random_word(rng) % 4 != 0;
+            d.m_axi_awready = aw.size() < 4 && (ideal || random_word(rng) % 3 != 0);
+            d.m_axi_wready = !aw.empty() && (ideal || random_word(rng) % 4 != 0);
             d.m_axi_bvalid = !b.empty() && b.front() <= now; d.m_axi_bresp = 0;
             d.eval();
             for (int p = 0; p < N; ++p) {
@@ -72,6 +75,7 @@ int main(int argc, char** argv) {
             }
             if (d.m_axi_bvalid) b.pop_front();
             if (d.dbg_logit_valid) logits.push_back(d.dbg_logit);
+            if (d.dbg_busy) ++pc_cycles[d.dbg_pc];
             edge(d); ++now;
         };
         AxilMaster<Vaccel_top> bus{d, tick, seed};
@@ -91,6 +95,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 128; ++i) { uint32_t w; std::memcpy(&w, &rope[s * 512 + 4 * i], 4); bus.write(ROPE_DATA, w); }
             bus.write(TOKEN, steps[s].first); bus.write(POS, steps[s].second);
             logits.clear();
+            std::fill(pc_cycles.begin(), pc_cycles.end(), 0);
             bus.write(CTRL, 1);
             uint32_t status; int polls = 0;
             do { status = bus.read(STATUS); require(++polls < 5000000, "accelerator timeout"); } while (!(status & 2) && ((status >> 8) & 0xFF) == 0);
@@ -104,6 +109,9 @@ int main(int argc, char** argv) {
             out << std::hex;
             for (auto v : logits) out << ' ' << v;
             out << std::dec << '\n';
+            out << "pc_cycles";
+            for (size_t i = 0; i < program.size() / 16; ++i) out << ' ' << pc_cycles[i];
+            out << '\n';
             std::cout << "token " << steps[s].first << " pos " << steps[s].second << " -> " << result
                       << " cycles=" << cyc << '\n';
         }

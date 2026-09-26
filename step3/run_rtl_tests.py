@@ -398,24 +398,27 @@ ACCEL_SOURCES = ["kv260_regs_pkg.sv", "fp32_pkg.sv", "axil_slave.sv", "axi_rd_mp
                  "bfp_quant.sv", "w4a16_dot.sv", "page_demux.sv", "gemv_core.sv", "accel_core.sv", "accel_top.sv"]
 
 
-def test_accel(ports, seed, toolchain, tokens=(1, 17, 42, 999, 0)):
-    """Full decode tokens through accel_top vs the software DCU (numerics v0.2), bit-exact."""
+def test_accel(ports, seed, toolchain, tokens=(1, 17, 42, 999, 0), model="tiny"):
+    """Full decode tokens through accel_top vs the software DCU (numerics v0.2), bit-exact.
+    model='qwen1l' uses the exact Qwen3-1.7B dimensions with one decoder layer."""
+    from dataclasses import replace
     from accel_golden import AccelCfg
     from dcu import DCU
     from ddr_pager import QuantCfg, build_image
     from isa import compile_decode, to_bytes
-    from model_cfg import TINY
+    from model_cfg import QWEN3_1_7B, TINY
     from ref_qwen3 import random_weights, rope_tables_raw
-    directory, binary, env = build("accel_top", {"NPORTS": ports, "SCRATCH_WORDS": 8192, "PROG_WORDS": 256,
-                                                 "MAX_CTX": 16, "TIMEOUT": 100000},
+    cfg, ctx, scratch = ((TINY, 16, 8192) if model == "tiny" else
+                         (replace(QWEN3_1_7B, name="Qwen3-1.7B-1layer", layers=1), 8, 65536))
+    directory, binary, env = build("accel_top", {"NPORTS": ports, "SCRATCH_WORDS": scratch, "PROG_WORDS": 256,
+                                                 "MAX_CTX": ctx, "TIMEOUT": 100000},
                                    "accel_main.cpp", {"ACC_NPORTS": ports}, *toolchain,
                                    sources=[RTL / name for name in ACCEL_SOURCES])
-    cfg = TINY
-    img = build_image(cfg, random_weights(cfg, seed=seed % 1000), QuantCfg(page=8192, ctx_max=16))
+    img = build_image(cfg, random_weights(cfg, seed=seed % 1000), QuantCfg(page=8192, ctx_max=ctx))
     before = img.buf.copy()
     program = to_bytes(compile_decode(img)[0])
     steps = [(t, pos) for pos, t in enumerate(tokens)]
-    cos, sin = rope_tables_raw(cfg.head_dim, cfg.rope_theta, 16)
+    cos, sin = rope_tables_raw(cfg.head_dim, cfg.rope_theta, ctx)
     rope = np.concatenate([np.concatenate([cos[pos, :64], sin[pos, :64]]) for _, pos in steps]).astype(np.float32)
     (directory / "image.bin").write_bytes(before.tobytes())
     (directory / "program.bin").write_bytes(program)
@@ -426,7 +429,9 @@ def test_accel(ports, seed, toolchain, tokens=(1, 17, 42, 999, 0)):
                   directory / "rope.bin", hex(base), directory, seed], directory, env, "simulate")
     # Software DCU on an identical copy of the image.
     dcu = DCU(img, program, AccelCfg())
-    rows = [line.split() for line in (directory / "results.txt").read_text().splitlines()]
+    lines = (directory / "results.txt").read_text().splitlines()
+    rows = [line.split() for line in lines if not line.startswith("pc_cycles")]
+    pc_rows = [[int(v) for v in line.split()[1:]] for line in lines if line.startswith("pc_cycles")]
     for (tok, pos), row in zip(steps, rows):
         logits, argmax = dcu.step(tok, pos)
         got = np.array([int(v, 16) for v in row[5:]], np.uint32)
@@ -441,14 +446,37 @@ def test_accel(ports, seed, toolchain, tokens=(1, 17, 42, 999, 0)):
     changed = int(np.count_nonzero(img.buf != before))
     assert changed > 0, "KV cache was not written"
     cycles = [int(r[3]) for r in rows]
-    report = f"PASS accel ports={ports} tokens={len(steps)} logits+argmax+DDR image bit-exact kv_bytes_changed={changed} cycles/token={cycles}"
+    report = (f"PASS accel model={cfg.name} ports={ports} tokens={len(steps)} logits({cfg.vocab})+argmax+DDR image "
+              f"({img.size} B) bit-exact kv_bytes_changed={changed} cycles/token={cycles}")
     print(report, flush=True)
-    return {"module": "accel_top", "ports": ports, "tokens": list(tokens), "report": report}
+    return {"module": "accel_top", "model": cfg.name, "ports": ports, "tokens": list(tokens), "report": report,
+            "pc_cycles": pc_rows, "program": [ins.op.name for ins in compile_decode(img)[0]]}
+
+
+def test_lint(seed, toolchain):
+    """Verilator -Wall lint of the Vivado-facing Verilog wrappers and everything below them."""
+    del seed
+    simulator, root, _, env = toolchain
+    from kv260 import gen_wrappers
+    if subprocess.run([sys.executable, str(BASE / "kv260" / "gen_wrappers.py")], capture_output=True).returncode:
+        raise RuntimeError("rtl/kv260_*_wrapper.v are stale; run python kv260/gen_wrappers.py --write")
+    directory = BUILD / "lint"
+    directory.mkdir(parents=True, exist_ok=True)
+    local_env = env.copy()
+    local_env["VERILATOR_ROOT"] = str(root)
+    tops = [f.removesuffix(".v") for f in gen_wrappers.FILES]
+    for top in tops:
+        run([simulator, "--lint-only", "-Wall", "--top-module", top,
+             *[RTL / name for name in ACCEL_SOURCES], RTL / "bw_test_top.sv", RTL / f"{top}.v"],
+            directory, local_env, f"lint_{top}")
+    report = f"PASS lint -Wall {', '.join(tops)}"
+    print(report, flush=True)
+    return {"module": "wrappers", "report": report}
 
 
 def plan(quick):
     """(name, callable(seed, toolchain)) for every RTL configuration."""
-    jobs = [("fp32", lambda seed, tc: test_fp32(seed, tc))]
+    jobs = [("lint", lambda seed, tc: test_lint(seed, tc)), ("fp32", lambda seed, tc: test_fp32(seed, tc))]
     jobs += [(f"dot{n}", lambda seed, tc, n=n: test_dot(n, seed, tc)) for n in ([32] if quick else [1, 8, 32, 128])]
     jobs += [(f"page{p}x{w}", lambda seed, tc, p=p, w=w: test_page(p, w, seed, tc))
              for p, w in ([(8192, 512)] if quick else [(8192, 512), (8192, 128), (4096, 64)])]
@@ -461,6 +489,9 @@ def plan(quick):
     jobs += [(f"axi_wr{w}", lambda seed, tc, w=w: test_axi_wr(w, seed, tc)) for w in ([128] if quick else [32, 64, 128])]
     jobs += [(f"bw{n}", lambda seed, tc, n=n: test_bw(n, seed, tc)) for n in ([4] if quick else [1, 2, 4])]
     jobs += [(f"accel{n}", lambda seed, tc, n=n: test_accel(n, seed, tc)) for n in ([4] if quick else [4, 1])]
+    if not quick:
+        jobs += [("accel_long", lambda seed, tc: test_accel(2, seed, tc, tokens=tuple((7 * i + 3) % 1000 for i in range(16)))),
+                 ("accel_qwen1l", lambda seed, tc: test_accel(4, seed, tc, tokens=(151643, 9707, 11), model="qwen1l"))]
     return jobs
 
 
@@ -470,6 +501,7 @@ def main():
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--only", nargs="*", default=None, help="run jobs whose name starts with any of these")
     parser.add_argument("--jobs", type=int, default=max(1, min(4, os.cpu_count() or 1)))
+    parser.add_argument("--report", action="store_true", help="write out/rtl_report.md")
     args = parser.parse_args()
     from kv260 import regmap
     if regmap.PKG.read_text(encoding="utf-8") != regmap.sv_package():
@@ -495,7 +527,35 @@ def main():
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
                "elapsed_s": round(time.perf_counter()-start, 2), "tests": reports}
     (BUILD / "summary.json").write_text(json.dumps(summary, indent=2)+"\n", encoding="utf-8")
+    if args.report:
+        write_report(summary, simulator, compiler)
     print(f"All {len(reports)} RTL configurations PASS ({summary['elapsed_s']}s).")
+
+
+def write_report(summary, simulator, compiler):
+    """out/rtl_report.md: what ran, with hashes of every source that was verified."""
+    import hashlib
+    import platform
+    files = sorted([*RTL.glob("*.sv"), *RTL.glob("*.v"), *(RTL / "tb").glob("*"), BASE / "run_rtl_tests.py",
+                    BASE / "rtl_golden.py", BASE / "spu_numerics.py"])
+    version = subprocess.run([str(simulator), "--version"], capture_output=True, text=True,
+                             env={**os.environ, "VERILATOR_ROOT": str(Path(simulator).parents[1])}).stdout.strip()
+    lines = ["# RTL verification", "",
+             f"Status: {summary['status']}. Actual Verilator RTL simulation; no Vivado synthesis, implementation "
+             "or board test.", "",
+             f"Seed {summary['seed']}; {summary['elapsed_s']} s wall; {version or 'Verilator'}; "
+             f"{Path(compiler).name} on {platform.system()} {platform.machine()}.", "",
+             "| Job | Module | Result |", "|---|---|---|"]
+    for t in summary["tests"]:
+        lines.append(f"| {t['job']} | {t['module']} | {t['report']} |")
+    lines += ["", "References: FP32 package vs NumPy binary32 (RNE, subnormals) and spu_numerics.exp_hw; "
+              "BFP/GEMV vs accel_golden; AXI masters vs a C++ AXI slave model with protocol assertions and "
+              "fault injection; accel_top vs dcu.DCU (logits, argmax and the full DDR image, KV cache "
+              "included). NaN payloads are compared canonically.", "",
+              "Reproduce from step3: `python3 run_rtl_tests.py --report` (`--quick` for one configuration per module).",
+              "", "## Verified source hashes", ""]
+    lines += [f"- `{f.relative_to(BASE).as_posix()}`: `{hashlib.sha256(f.read_bytes()).hexdigest()}`" for f in files]
+    (BASE / "out" / "rtl_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

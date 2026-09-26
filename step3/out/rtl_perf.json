@@ -1,0 +1,30 @@
+{
+  "model": "Qwen3-1.7B dims, 1 decoder layer measured, 28 extrapolated",
+  "memory_model": "ideal 4x128-bit",
+  "positions": 8,
+  "cycles_by_op_mean": {
+    "CFG": 13.0,
+    "EMB": 1251.0,
+    "VLOAD": 7054.0,
+    "RMSN": 18442.0,
+    "GEMV": 407121.0,
+    "ROPE": 1540.0,
+    "KVW": 530.0,
+    "ATTN": 2074.0,
+    "SILU": 6146.0,
+    "END": 1.0
+  },
+  "lm_head_cycles": 2507239.0,
+  "attn_cycles_fit": {
+    "per_row": 192.00000000000009,
+    "intercept": 1209.9999999999995
+  },
+  "final_norm_cycles": 6437.0,
+  "context": 1024,
+  "projected_cycles_per_token": 20222659.000000004,
+  "projected_tok_s": 9.889896279218275,
+  "clock_mhz": 200.0,
+  "weight_stream_bound_cycles": 13864992.0,
+  "weight_stream_bound_tok_s": 14.42481899737122,
+  "bit_exact_report": "PASS accel model=Qwen3-1.7B-1layer ports=4 tokens=8 logits(151936)+argmax+DDR image (186687488 B) bit-exact kv_bytes_changed=16492 cycles/token=[2950739, 2950931, 2951123, 2951315, 2951507, 2951699, 2951891, 2952083]"
+}

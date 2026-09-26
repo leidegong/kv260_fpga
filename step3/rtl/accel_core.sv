@@ -23,7 +23,8 @@ module accel_core #(
     parameter int ADDR_W = 49,
     parameter int SCRATCH_WORDS = 65536,
     parameter int PROG_WORDS = 1024,
-    parameter int MAX_CTX = 4096
+    parameter int MAX_CTX = 4096,
+    parameter int MAX_VEC = 8192             // largest VLOAD / FP16 embedding row (elements)
 ) (
     input  logic                     clk,
     input  logic                     rst_n,
@@ -70,7 +71,8 @@ module accel_core #(
     input  logic [3:0]               wr_error,
     // debug: every lm_head (F_ARGMAX) output in row order
     output logic                     dbg_logit_valid,
-    output logic [31:0]              dbg_logit
+    output logic [31:0]              dbg_logit,
+    output logic [15:0]              dbg_pc            // instruction being executed
 );
     import fp32_pkg::*;
     localparam int D = 128;                                   // head_dim supported
@@ -79,7 +81,9 @@ module accel_core #(
     localparam int PW = $clog2(PROG_WORDS);
     localparam int KVB = MAX_CTX * D;                         // bytes of K (or V) rows
     localparam int SCB = ((2 * MAX_CTX + W_BYTES - 1) / W_BYTES) * W_BYTES;
-    localparam int LBUF = 2 * KVB + 2 * SCB + 2 * W_BYTES;
+    localparam int LBUF_KV = 2 * KVB + 2 * SCB + 2 * W_BYTES;
+    localparam int LBUF_VEC = 2 * MAX_VEC + W_BYTES + 64;  // also covers EMB's group + scale word
+    localparam int LBUF = (LBUF_KV > LBUF_VEC) ? LBUF_KV : LBUF_VEC;
     localparam int LW = $clog2(LBUF);
     localparam int TW = (MAX_CTX > 1) ? $clog2(MAX_CTX) : 1;         // sbuf index
     localparam int OFF_V = KVB, OFF_KS = 2 * KVB, OFF_VS = 2 * KVB + SCB;
@@ -217,6 +221,7 @@ module accel_core #(
     assign err_code = err;
     assign dbg_logit_valid = state == S_GEMV_RUN && g_y_valid && flags[1];
     assign dbg_logit = gemv_y;
+    assign dbg_pc = 16'(pc);
 
     // --------------------------------------------------------------- derived config
     logic [31:0] n_q, n_kv, gqa, kv_data, kv_scale, eps;
@@ -311,7 +316,9 @@ module accel_core #(
                     end else begin
                         case (op_raw)
                             6'(OP_EMB): begin
-                                if (flags[0]) begin                                  // F_EMB_F16
+                                if (flags[0] && 32'(n) > MAX_VEC) begin
+                                    err <= 8'd7; err_pc <= 16'(pc); state <= S_ERR;
+                                end else if (flags[0]) begin                         // F_EMB_F16
                                     f_bytes <= 32'(n) * 2 + 32'(token * 32'(n) * 2 % W_BYTES);
                                     f_addr <= (op_base + A(token * 32'(n) * 2)) & ~A(W_BYTES - 1);
                                     f_dst <= '0; ret_state <= S_EMB_F16; state <= S_RD_CMD;
@@ -322,8 +329,12 @@ module accel_core #(
                                 end
                             end
                             6'(OP_VLOAD): begin
-                                f_addr <= op_base; f_bytes <= 32'(n) * 2; f_dst <= '0;
-                                ret_state <= S_VLOAD; state <= S_RD_CMD;
+                                if (32'(n) > MAX_VEC) begin
+                                    err <= 8'd7; err_pc <= 16'(pc); state <= S_ERR;
+                                end else begin
+                                    f_addr <= op_base; f_bytes <= 32'(n) * 2; f_dst <= '0;
+                                    ret_state <= S_VLOAD; state <= S_RD_CMD;
+                                end
                             end
                             6'(OP_RMSN): state <= (aux == 0 || 32'(n) % 32'(aux) != 0) ? S_ERR : S_RMS_SUM;
                             6'(OP_ROPE): state <= (32'(n) != 32'(aux) * D) ? S_ERR : S_ROPE;
@@ -390,7 +401,7 @@ module accel_core #(
                         j <= 32'd1;
                     end else if (j == 1) begin
                         f_addr <= (op_base + A(blk * 33 * PAGE + 2 * jj)) & ~A(W_BYTES - 1);
-                        f_bytes <= 32'(W_BYTES); f_dst <= LW'(W_BYTES);
+                        f_bytes <= 32'(W_BYTES); f_dst <= LW'(64);            // after the 64 B group
                         k <= (2 * jj) % W_BYTES;
                         ret_state <= S_EMB_NEXT; state <= S_RD_CMD;
                         j <= 32'd2;
@@ -401,7 +412,7 @@ module accel_core #(
                 S_EMB_DEQ: begin
                     // 128 values of group i: (nibble - 8) * scale
                     logic [31:0] sc;
-                    sc = h2f(lb16(LW'(W_BYTES + k)));
+                    sc = h2f(lb16(LW'(64 + k)));
                     for (int l = 0; l < 128; l++) begin
                         logic [3:0] nib;
                         nib = (l % 2 == 0) ? lbuf[l / 2][3:0] : lbuf[l / 2][7:4];

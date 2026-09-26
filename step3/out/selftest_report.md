@@ -1,6 +1,6 @@
 # selftest.py 结果
 
-24 passed, 1 skipped, 0 failed.
+26 passed, 1 skipped, 0 failed.
 
 - PASS paging round trip (pack/unpack/row fetch, 48 layouts)
 - PASS RTN-sym W4 error <= scale/2 + fp16 rounding
@@ -27,6 +27,8 @@
 - PASS uncached MMU preserves logits and avoids decoded-model cache
 - PASS safetensors bounded row import covers FP32/FP16/BF16
 - PASS safetensors rejects truncated tensors and packed quantized checkpoints
+- PASS exp_hw (RTL-exact exp) max error < 1 ULP on normal results（max 0.962 ULP, mean 0.266; this CPU's np.exp max 2.260）
+- PASS numerics v0.2 (exp_hw) vs v0.1 (np.exp): logit change < 1e-3 (1/5 of KV8 format error), same argmax（max rel 6.6e-04）
 
 | 配置 | 相对 FP32 参考（同一 W4 权重、同一 KV 格式）误差 | top-1 一致 | 流量 = 分页计划 |
 |---|---|---|---|
