@@ -538,8 +538,9 @@ def write_report(summary, simulator, compiler):
     import platform
     files = sorted([*RTL.glob("*.sv"), *RTL.glob("*.v"), *(RTL / "tb").glob("*"), BASE / "run_rtl_tests.py",
                     BASE / "rtl_golden.py", BASE / "spu_numerics.py"])
-    version = subprocess.run([str(simulator), "--version"], capture_output=True, text=True,
-                             env={**os.environ, "VERILATOR_ROOT": str(Path(simulator).parents[1])}).stdout.strip()
+    wheels = sorted((RTL / ".tools").glob("verilator-*.dist-info"))
+    version = ("Verilator " + wheels[-1].name.split("-")[1] + " (PyPI wheel)") if wheels else \
+        subprocess.run([str(simulator), "--version"], capture_output=True, text=True).stdout.strip()
     lines = ["# RTL verification", "",
              f"Status: {summary['status']}. Actual Verilator RTL simulation; no Vivado synthesis, implementation "
              "or board test.", "",

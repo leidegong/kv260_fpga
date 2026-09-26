@@ -2,9 +2,11 @@
 
 目标：VPU / SPU / MMU + DDR 权重分页，batch=1、1024上下文持续解码8–10 tokens/s。
 
-**当前是可运行的软件样机、模型导出链路和经过仿真的首批RTL；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。SPU/DCU RTL、AXI读写/重排、KV硬件调度、PS/PL集成和驱动仍需实现；没有bitstream、完整真实checkpoint质量结果或板测速度。
+**当前状态：软件样机、模型导出链路，以及经 Verilator 仿真的完整功能级加速器 RTL；还不是可上板的加速器。** 板卡环境尚未准备好，本机没有 Vivado，因此没有综合/时序/资源报告、bitstream、板测速度，也没有真实 checkpoint 的质量结果。
 
-实施规格见 [KV260 v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md)。P3 v0.1及旧P3性能报告保留作历史分析，不能用作KV260部署配置。新平台预算见 [KV260报告](out/kv260_report.md)。
+功能级 RTL（`rtl/accel_top.sv`）能执行编译出的 decode 程序，整 token 与软件 DCU **逐位一致**（全部 logits、argmax、整个 DDR 镜像含 KV cache），已在 Qwen3-1.7B 真实维度（1 层 + 151936 行 lm_head）上验证。它是功能基线：浮点为单周期函数、指令不重叠，满足 200 MHz 需要另做流水化设计。M1 带宽测试 IP（`rtl/bw_test_top.sv`）、多 HP 口 AXI 读写主机、主机驱动与 Vivado 脚本已就绪，等待上板。
+
+实施规格见 [KV260 v0.3](../research/Step3_KV260实施规格_v0.3_2026-09-26.md)（[v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md) 保留）。P3 v0.1 及旧 P3 性能报告仅作历史分析，不能用作 KV260 部署配置。预算见 [KV260 报告](out/kv260_report.md)，RTL 周期剖析见 [RTL 周期报告](out/rtl_perf_report.md)。
 
 ## 1. 运行软件回归
 
@@ -13,11 +15,13 @@
 ```bash
 python3 -m pip install -r requirements.txt
 python3 selftest.py
-python3 -m unittest test_export_kv260 test_axi_plan test_kv260_perf -v
+python3 -m unittest test_export_kv260 test_axi_plan test_kv260_perf test_kv260_driver -v
 python3 kv260_report.py
 ```
 
-软件自测覆盖页格式、BFP整数点积、GQA/KV、DCU程序、批量prefill、非法指令/布局、未初始化KV和checkpoint读取。Torch/CUDA为可选对照，缺少时报告跳过；不能把跳过说成已验证。
+软件自测覆盖页格式、BFP整数点积、GQA/KV、DCU程序、批量prefill、非法指令/布局、未初始化KV、checkpoint读取，以及数值规范 v0.2 的 exp 误差预算。Torch/CUDA为可选对照，缺少时报告跳过；不能把跳过说成已验证。
+
+数值规范 v0.2：exp 使用固定的 float32 算法 `spu_numerics.exp_hw`（实测 < 1 ULP），软件与 RTL 共用，因此两者可以逐位比较；`np.exp` 的结果随 CPU SIMD 路径变化，`AccelCfg(exp="numpy")` 可复现 v0.1。
 
 `perf_model.py` / `dram_sim.py` / `cyclesim.py` 的无参默认仍是历史P3分析。KV260请使用 `kv260_report.py`，不要把旧报告重命名成板测数据。
 
@@ -53,33 +57,37 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 
 对照报告包含逐token logits误差、top1一致性和下一token NLL，反映RTN、KV与数值数据通路的合并误差；还需固定语料/任务集评估真实中文质量。随机权重和短序列通过不意味着量化质量达标。
 
-## 5. RTL仿真与综合
+## 5. RTL 仿真
 
-已新增两个独立核心：
+模块与契约详见 [rtl/README.md](rtl/README.md)。概要：
 
-| 核心 | 已实现 | 尚不包含 |
+| 层次 | 模块 | 验证 |
 |---|---|---|
-| `rtl/page_demux.sv` | W4/g128 S/W页分流、尾页padding剔除、ready/valid反压 | AXI主机、乱序重排、scale缓存、W8模式 |
-| `rtl/w4a16_dot.sv` | 128元素组内精确整数点积，LANES可配置 | BFP量化、scale恢复、组间FP32累加、完整矩阵调度 |
-
-A16表示有符号整数尾数，**不是IEEE FP16**。默认32路dot只用于首批功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。
+| 数值单元 | `fp32_pkg`（加/乘/除/开方/转换/exp）、`bfp_quant`、`w4a16_dot` | 与 NumPy/黄金模型逐位一致 |
+| VPU | `page_demux` + `gemv_core` | 与 `VPU.gemv` 逐位一致，64/128/512 位 |
+| MMU/访存 | `axi_rd_mport`（1–4 HP 口，按序合并）、`axi_wr_stream`（字节选通） | C++ AXI 从机模型 + 故障注入 |
+| M1 IP | `bw_test_top` | 校验和、写图案、读写并发、寄存器 |
+| 整机功能 | `accel_core` + `accel_top`（DCU/SPU/注意力/KV/GEMV） | 与软件 DCU 整 token 逐位一致（tiny 1/2/4 口、16 token；Qwen3-1.7B 维度 1 层） |
 
 ```bash
 python3 -m pip install --target rtl/.tools -r requirements-rtl.txt
-python3 run_rtl_tests.py
+python3 run_rtl_tests.py --report      # 全矩阵，约 4 分钟（4 核），写 out/rtl_report.md
+python3 run_rtl_tests.py --quick       # 每个模块一种配置
+python3 rtl_perf.py                    # Qwen3-1.7B 维度周期剖析，约 5 分钟
 ```
 
-使用实际Verilator仿真RTL，再与NumPy和现有页打包器比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。当前机器的Verilator已局部安装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
+仿真使用实际 Verilator RTL；日志与产物在 `rtl/.build`，失败返回非零，不存在软件替代。Windows 需 MSVC，Linux 需 C++20 编译器。
 
-完整测试覆盖LANES 1/8/32/128、8KiB×512bit、8KiB×128bit、4KiB×64bit页流，含随机停顿、结果反压、复位、极值与尾页。`--quick`仅运行默认两种配置。数值规范中的SPU浮点运算仍须独立验证，当前RTL测试不覆盖完整模型。
+A16 是有符号整数尾数，**不是 IEEE FP16**。`accel_top` 当前只支持 BATCH=1（decode）、W4、R=1、页 8192、head_dim 128、KV8；`--lm-bits 8` 包会报配置错误。
 
-安装Vivado的K26器件支持后可运行：
+Vivado 相关（**均未运行**）：
 
 ```bash
-vivado -mode batch -source kv260/synth_ooc.tcl
+vivado -mode batch -source kv260/synth_ooc.tcl                       # 叶模块与 M1 IP 的 OOC 综合
+vivado -mode batch -source kv260/build_bd.tcl -tclargs bw 200        # KV260 块设计 + bitstream（先做 M1）
 ```
 
-该脚本只做两核心的out-of-context综合，输出资源/综合时序报告至 `build/synth_ooc`。此处尚未运行Vivado；脚本不生成bitstream，报告也不等于布局布线时序收敛。
+`build_bd.tcl` 需要 KV260 板卡文件，使用生成的 Verilog 外壳 `rtl/kv260_*_wrapper.v`（`python3 kv260/gen_wrappers.py --write`）。`accel` 设计仅用于走通流程，其单周期浮点预期无法在 200 MHz 收敛。
 
 ## 6. 板卡准备好之后
 
@@ -89,20 +97,36 @@ vivado -mode batch -source kv260/synth_ooc.tcl
 python3 board_probe.py --out board_probe.json
 ```
 
-脚本源文件是 `kv260/board_probe.py`；它不加载overlay、不修改固件或系统。之后按KV260实施规格依次完成DDR带宽测试IP、数值核、单层和全模型。板上系统未确定前，不假设存在PYNQ、连续1GB CMA内存或可用的任意物理地址。
+脚本源文件是 `kv260/board_probe.py`；它不加载overlay、不修改固件或系统。之后按 v0.3 规格第 4 节：构建 `bw` 设计 → 设备树 UIO + u-dma-buf → 运行带宽扫描：
 
-权重页是8KiB，AXI burst不能跨4KiB。`python3 kv260/axi_plan.py --bytes 8192`展示正确拆分；默认base=0只是相对地址示例，不能直接提交给硬件。ISA地址也是镜像相对地址，硬件须加驱动分配的DMA基址。
+```bash
+python3 kv260/bw_driver.py --uio /dev/uio0 --udmabuf udmabuf0 --clock-mhz 200 --out bw_report.json
+```
+
+加速器位流就绪后，主机运行时为：
+
+```bash
+python3 kv260/accel_driver.py bundles/qwen3-w4 --uio /dev/uio1 --udmabuf udmabuf0 --tokens 151644,872 --max-new 32 --clock-mhz 200
+```
+
+驱动先校验包（SHA256/布局/ISA），把镜像拷入 DMA 缓冲区，写程序、IMAGE_BASE、ATTN_SCALE，逐 token 写 RoPE 行并启动。寄存器定义唯一来源为 `kv260/regmap.py`。板上系统未确定前，不假设存在PYNQ、连续1GB CMA内存或可用的任意物理地址；DMA 缓冲区须覆盖整个镜像（1024 上下文为 949,968,896 字节，约 0.88 GiB）。
+
+权重页是8KiB，AXI burst不能跨4KiB。`python3 kv260/axi_plan.py --bytes 8192`展示正确拆分；ISA地址是镜像相对地址，硬件加驱动分配的DMA基址。
 
 ## 7. 文件与验证状态
 
 | 文件 | 用途 |
 |---|---|
 | `model_cfg.py` / `ddr_pager.py` | 模型参数、RTN、S/W页布局与流量 |
-| `accel_golden.py` / `ref_qwen3.py` | 数值样机、FP32参考、safetensors读取 |
+| `accel_golden.py` / `ref_qwen3.py` / `spu_numerics.py` | 数值样机（规范 v0.2）、FP32参考、safetensors读取、exp 定义 |
 | `isa.py` / `dcu.py` | 128bit ISA、编译器、严格指令校验、软件执行 |
 | `export_kv260.py` / `run_bundle.py` | 可校验软件部署包、无副作用镜像执行及精度对照 |
 | `platforms.py` / `kv260_report.py` | KV260端口、计算及存储预算；预测非板测 |
+| `rtl/` / `run_rtl_tests.py` / `rtl_golden.py` | RTL、Verilator 测试平台、参考向量 |
+| `rtl_perf.py` | Qwen3-1.7B 维度 RTL 周期剖析与外推 |
+| `kv260/regmap.py` / `gen_wrappers.py` | 寄存器映射与 IP Integrator 外壳（生成 SV/Verilog） |
+| `kv260/bw_driver.py` / `accel_driver.py` | 板上驱动；含寄存器级假设备用于回归 |
+| `kv260/build_bd.tcl` / `synth_ooc.tcl` | Vivado 块设计/位流与 OOC 综合（未运行） |
 | `kv260/axi_plan.py` / `board_probe.py` | AXI契约、只读板卡信息 |
-| `rtl/` / `run_rtl_tests.py` | 首批可综合核心与真实RTL仿真 |
 
-本次软件回归24项通过，1项Torch/CUDA对照因未安装而跳过；bundle/AXI回归8/8通过，平台预算回归9/9通过。RTL矩阵7/7通过，结果见 [RTL报告](out/rtl_report.md)；全部验证汇总见 [验证记录](out/validation_report.md)。实际部署的剩余工作及各阶段通过条件见KV260实施规格。
+本次：软件自测 26 项通过、1 项 Torch/CUDA 对照因未安装而跳过；unittest 24/24 通过；RTL 矩阵 30/30 通过，结果见 [RTL报告](out/rtl_report.md)；全部汇总见 [验证记录](out/validation_report.md)。真实权重精度、Vivado 与板测均未运行。
