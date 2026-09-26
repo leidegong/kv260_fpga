@@ -8,7 +8,7 @@
 - PASS BFP quantiser: range, minimal exponent, error <= half step
 - PASS exact integer group dots (float32 chunked BLAS == int64)
 - SKIP torch/CUDA GEMV bit-identical to numpy（no torch）
-- PASS pure datapath error (A16, KV16) < 5e-4 and < 10% of the KV8 format error（A16 1.17e-04, A24 5.18e-05, KV8 alone 5.17e-03）
+- PASS pure datapath error (A16, KV16) < 5e-4 and < 10% of the KV8 format error（A16 1.18e-04, A24 5.17e-05, KV8 alone 5.17e-03）
 - PASS virtual accelerator traffic == page plan, every step
 - PASS variants keep traffic == plan (KV16, fp16 embed, W8 head, no reuse, 8 KiB/R=4)
 - PASS GQA reuse changes traffic only, not numerics
@@ -30,13 +30,13 @@
 
 | 配置 | 相对 FP32 参考（同一 W4 权重、同一 KV 格式）误差 | top-1 一致 | 流量 = 分页计划 |
 |---|---|---|---|
-| A16 BFP, KV16 (pure datapath) | 1.17e-04 | 100% | True |
-| A24 BFP, KV16 | 5.18e-05 | 100% | True |
-| A16 BFP, KV8, lm_head W4 (baseline) | 2.10e-03 | 100% | True |
+| A16 BFP, KV16 (pure datapath) | 1.18e-04 | 100% | True |
+| A24 BFP, KV16 | 5.17e-05 | 100% | True |
+| A16 BFP, KV8, lm_head W4 (baseline) | 2.08e-03 | 100% | True |
 | A8 BFP, KV8 | 2.97e-02 | 100% | True |
-| A16, KV8, embedding FP16 table | 2.10e-03 | 100% | True |
-| A16, KV8, lm_head W8 | 2.57e-03 | 100% | True |
-| A16, KV8, no GQA K/V reuse | 2.10e-03 | 100% | True |
-| A16, KV8, page 8 KiB, R=4 | 2.10e-03 | 100% | True |
+| A16, KV8, embedding FP16 table | 2.11e-03 | 100% | True |
+| A16, KV8, lm_head W8 | 2.59e-03 | 100% | True |
+| A16, KV8, no GQA K/V reuse | 2.08e-03 | 100% | True |
+| A16, KV8, page 8 KiB, R=4 | 2.08e-03 | 100% | True |
 
 FP32 参考内部：KV8 相对 FP KV 误差 5.17e-03；W4 相对原始权重误差 2.24e-01（随机权重，不代表真实模型）。

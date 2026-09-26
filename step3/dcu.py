@@ -225,7 +225,7 @@ class DCU:
             elif op == Op.SILU:
                 for b in range(nb):
                     o = b * ins.n
-                    seg(ins.dst + o, ins.n)[:] = spu_silu_mul(seg(ins.src0 + o, ins.n), seg(ins.src1 + o, ins.n))
+                    seg(ins.dst + o, ins.n)[:] = spu_silu_mul(seg(ins.src0 + o, ins.n), seg(ins.src1 + o, ins.n), vpu.exp)
             elif op == Op.ADD:
                 for b in range(nb):
                     o = b * ins.n

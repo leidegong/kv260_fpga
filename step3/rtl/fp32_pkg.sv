@@ -166,6 +166,173 @@ package fp32_pkg;
         return 32'd0;
     endfunction
 
+
+    // Normalize a finite nonzero binary32: mantissa with bit 23 set and the
+    // unbiased exponent of that bit (value = m * 2^(e - 23)).
+    function automatic logic [23:0] norm_mant(input logic [31:0] a);
+        logic [63:0] m;
+        m = {40'd0, mant(a)};
+        return 24'(m << (clz64(m) - 7'd40));
+    endfunction
+    function automatic logic signed [15:0] norm_exp(input logic [31:0] a);
+        return uexp(a) - $signed({9'd0, clz64({40'd0, mant(a)}) - 7'd40});
+    endfunction
+
+    // IEEE division, round to nearest even.
+    function automatic logic [31:0] fdiv(input logic [31:0] a, input logic [31:0] b);
+        logic s;
+        logic [63:0] q, r, sig;
+        logic [6:0] lz;
+        s = a[31] ^ b[31];
+        if (is_nan(a) || is_nan(b)) return QNAN;
+        if (is_inf(a)) return is_inf(b) ? QNAN : {s, 8'hff, 23'd0};
+        if (is_inf(b)) return {s, 31'd0};
+        if (b[30:0] == 0) return (a[30:0] == 0) ? QNAN : {s, 8'hff, 23'd0};
+        if (a[30:0] == 0) return {s, 31'd0};
+        // q = floor(ma * 2^40 / mb) has 40..41 significant bits; the remainder is sticky.
+        q = {norm_mant(a), 40'd0} / {40'd0, norm_mant(b)};
+        r = {norm_mant(a), 40'd0} % {40'd0, norm_mant(b)};
+        lz = clz64(q);
+        sig = q << lz;
+        sig[0] = sig[0] | (r != 0);
+        return round_pack(s, norm_exp(a) - norm_exp(b) - 16'sd40 + 16'(16'sd63 - $signed({9'd0, lz})), sig);
+    endfunction
+
+    // IEEE square root, round to nearest even (sqrt(-0) = -0).
+    function automatic logic [31:0] fsqrt(input logic [31:0] a);
+        logic [63:0] m, root, rem, trial, sig;
+        logic signed [15:0] e, ev;
+        logic [6:0] lz;
+        if (is_nan(a)) return QNAN;
+        if (a[30:0] == 0) return a;
+        if (a[31]) return QNAN;
+        if (is_inf(a)) return a;
+        // value = m * 2^ev with m = norm_mant << (38 or 39) so ev is even and m < 2^63.
+        e = norm_exp(a) - 16'sd23;
+        if (e[0]) begin
+            m = {40'd0, norm_mant(a)} << 39;
+            ev = e - 16'sd39;
+        end else begin
+            m = {40'd0, norm_mant(a)} << 38;
+            ev = e - 16'sd38;
+        end
+        root = '0;
+        rem = '0;
+        // Bit-serial integer square root: root = floor(sqrt(m)), rem = m - root^2.
+        for (int i = 31; i >= 0; i--) begin
+            rem = (rem << 2) | ((m >> (2 * i)) & 64'd3);
+            trial = (root << 2) | 64'd1;
+            root = root << 1;
+            if (rem >= trial) begin
+                rem = rem - trial;
+                root = root | 64'd1;
+            end
+        end
+        lz = clz64(root);
+        sig = root << lz;
+        sig[0] = sig[0] | (rem != 0);
+        return round_pack(1'b0, (ev >>> 1) + 16'(16'sd63 - $signed({9'd0, lz})), sig);
+    endfunction
+
+    // binary32 -> binary16, round to nearest even, overflow to infinity.
+    function automatic logic [15:0] f2h(input logic [31:0] a);
+        logic [63:0] m;
+        logic signed [15:0] e, be;
+        logic [11:0] keep;
+        logic guard, sticky;
+        if (is_nan(a)) return 16'h7e00;
+        if (is_inf(a)) return {a[31], 15'h7c00};
+        if (a[30:0] == 0) return {a[31], 15'd0};
+        e = norm_exp(a);                               // value = 1.f * 2^e
+        m = {norm_mant(a), 40'd0};                     // leading one at bit 63
+        be = e + 16'sd15;
+        if (be >= 16'sd31) return {a[31], 15'h7c00};
+        if (be < 16'sd1) m = shr_sticky(m, 16'(16'sd1 - be));
+        keep = {1'b0, m[63:53]};
+        guard = m[52];
+        sticky = |m[51:0];
+        keep = keep + {11'd0, guard && (sticky || keep[0])};
+        if (be >= 16'sd1) begin
+            if (keep[11]) begin
+                keep = keep >> 1;
+                be = be + 16'sd1;
+                if (be >= 16'sd31) return {a[31], 15'h7c00};
+            end
+            return {a[31], be[4:0], keep[9:0]};
+        end
+        return {a[31], 4'd0, keep[10], keep[9:0]};
+    endfunction
+
+    // Signed 64-bit integer to binary32.
+    function automatic logic [31:0] i64_to_f(input logic signed [63:0] v);
+        logic [63:0] mag;
+        logic [6:0] lz;
+        if (v == 0) return 32'd0;
+        mag = v[63] ? 64'(-v) : 64'(v);
+        lz = clz64(mag);
+        return round_pack(v[63], 16'(16'sd63 - $signed({9'd0, lz})), mag << lz);
+    endfunction
+
+    // Round to nearest even integer, as a binary32 value (np.rint on float32).
+    function automatic logic [31:0] frint(input logic [31:0] a);
+        logic [23:0] m;
+        logic signed [15:0] sh;
+        logic [23:0] q;
+        logic guard, sticky;
+        if (is_nan(a) || is_inf(a) || a[30:23] >= 8'd150) return a;   // already integral
+        if (a[30:0] == 0) return a;
+        m = mant(a);
+        sh = 16'sd23 - uexp(a);                         // |a| = m * 2^-sh, sh >= 1
+        if (sh > 16'sd24) return {a[31], 31'd0};        // |a| < 0.5
+        q = m >> sh;
+        guard = m[5'(sh - 16'sd1)];
+        sticky = (sh > 16'sd1) && ((m & ~(24'hffffff << (sh - 16'sd1))) != 0);
+        q = q + {23'd0, guard && (sticky || q[0])};
+        return (q == 0) ? {a[31], 31'd0} : i2f(a[31] ? -$signed({8'd0, q}) : $signed({8'd0, q}));
+    endfunction
+
+    // Integral binary32 (|v| <= 2^24 region used here) to a saturated int32.
+    function automatic logic signed [31:0] f2i_sat(input logic [31:0] a);
+        logic [63:0] m;
+        logic signed [15:0] e;
+        if (is_nan(a)) return 32'sd0;
+        if (a[30:0] == 0) return 32'sd0;
+        e = uexp(a);
+        if (e >= 16'sd31) return a[31] ? -32'sd2147483647 - 32'sd1 : 32'sd2147483647;
+        if (e < 16'sd0) return 32'sd0;
+        m = {40'd0, mant(a)};
+        m = (e >= 16'sd23) ? m << (e - 16'sd23) : m >> (16'sd23 - e);
+        return a[31] ? -$signed(32'(m)) : $signed(32'(m));
+    endfunction
+
+    // exp as specified by spu_numerics.exp_hw (bit-exact definition).
+    function automatic logic [31:0] fexp(input logic [31:0] x);
+        logic [31:0] n, r, p, z, y, o;
+        logic signed [31:0] ni;
+        logic signed [15:0] n1, n2;
+        if (is_nan(x)) return QNAN;
+        if (!x[31] && x[30:0] > 31'h42B17217) return 32'h7f800000;      // x > 88.72283f
+        if (x[31] && x[30:0] > 31'h42CFF1B4) return 32'd0;                // x < -103.97208f
+        n = frint(fmul(x, 32'h3FB8AA3B));
+        // (x - n*C1) - n*C2 with C1 = 0.693359375, C2 = -2.12194440e-4 (negations are exact)
+        r = fadd(fadd(x, fmul(n, 32'hBF318000)), fmul(n, 32'h395E8083));
+        p = 32'h39506967;
+        p = fadd(fmul(p, r), 32'h3AB743CE);
+        p = fadd(fmul(p, r), 32'h3C088908);
+        p = fadd(fmul(p, r), 32'h3D2AA9C1);
+        p = fadd(fmul(p, r), 32'h3E2AAAAA);
+        p = fadd(fmul(p, r), 32'h3F000000);
+        z = fmul(r, r);
+        y = fadd(fadd(fmul(p, z), r), 32'h3F800000);
+        ni = f2i_sat(n);
+        if (ni > 32'sd200) ni = 32'sd200;
+        if (ni < -32'sd200) ni = -32'sd200;
+        n1 = (ni < -32'sd126) ? -16'sd126 : (ni > 32'sd127) ? 16'sd127 : 16'(ni);
+        n2 = 16'(ni) - n1;
+        o = fmul(y, pow2(n1));
+        return fmul(o, pow2(n2));
+    endfunction
+
     // Total order key for finite values / infinities; -0 and +0 compare equal.
     function automatic logic signed [32:0] order_key(input logic [31:0] a);
         if (a[30:0] == 0) return 33'sd0;

@@ -42,7 +42,8 @@ def fp32_corpus(n, rng):
 
 
 def fp32_expected(a, b, h, e):
-    """Reference for rtl/tb/fp32_probe.sv: (mul, add, i2f(a as int32), h2f(h), pow2(e))."""
+    """Reference for rtl/tb/fp32_probe.sv, in its output order."""
+    from spu_numerics import exp_hw
     fa, fb = bits_f32(a), bits_f32(b)
     with np.errstate(all="ignore"):
         mul = f32_bits(fa * fb)
@@ -50,7 +51,15 @@ def fp32_expected(a, b, h, e):
         i2f = f32_bits(a.view(np.int32).astype(F32))
         h2f = f32_bits(h.astype(np.uint16).view(np.float16).astype(F32))
         pow2 = f32_bits(np.ldexp(F32(1), e.astype(np.int16).astype(np.int64)).astype(F32))
-    return mul, add, i2f, h2f, pow2
+        div = f32_bits(fa / fb)
+        sqrt = f32_bits(np.sqrt(fa))
+        f2h = fa.astype(np.float16).view(np.uint16).astype(np.uint32)
+        f2h = np.where(np.isnan(fa), np.uint32(0x7E00), f2h)
+        exp = f32_bits(exp_hw(fa))
+        i64 = (a.astype(np.uint64) | (b.astype(np.uint64) << np.uint64(32))).view(np.int64)
+        i64f = f32_bits(i64.astype(F32))
+        rint = f32_bits(np.rint(fa))
+    return mul, add, i2f, h2f, pow2, div, sqrt, f2h, exp, i64f, rint
 
 
 def canonical(bits):

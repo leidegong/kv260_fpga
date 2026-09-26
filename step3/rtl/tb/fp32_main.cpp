@@ -1,6 +1,6 @@
 #include "Vfp32_probe.h"
 #include "sim_common.h"
-// Reads lines "a b h e" (hex) and writes "mul add i2f h2f pow2" (hex).
+// Reads lines "a b h e" (hex); writes mul add i2f h2f pow2 div sqrt f2h exp i64f rint (hex).
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "fp32 probe requires vectors and results");
@@ -14,7 +14,9 @@ int main(int argc, char** argv) {
         while (input >> std::hex >> a >> b >> h >> e) {
             dut.a = a; dut.b = b; dut.h = uint16_t(h); dut.e = uint16_t(e);
             dut.eval();
-            output << dut.mul << ' ' << dut.add << ' ' << dut.i2f << ' ' << dut.h2f << ' ' << dut.pow2 << '\n';
+            output << dut.mul << ' ' << dut.add << ' ' << dut.i2f << ' ' << dut.h2f << ' ' << dut.pow2 << ' '
+                   << dut.div << ' ' << dut.sqrt << ' ' << dut.f2h << ' ' << dut.exp << ' ' << dut.i64f << ' '
+                   << dut.rint << '\n';
             ++count;
         }
         dut.final();

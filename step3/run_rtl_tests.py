@@ -235,6 +235,12 @@ def test_fp32(seed, toolchain, n=20000):
     b[: len(b) // 8] = a[: len(b) // 8] ^ np.uint32(0x80000000)
     k = len(b) // 8
     b[k: 2 * k] = (a[k: 2 * k] ^ np.uint32(0x80000000)) + rng.integers(0, 4, k, dtype=np.uint32)
+    # Dense exp domain: softmax/SiLU arguments, thresholds and the subnormal-result range.
+    ex = np.concatenate([rng.uniform(-104.5, 89.0, 30000), rng.uniform(-104.5, -87.0, 5000), rng.uniform(-2, 2, 5000),
+                         [88.72283, 88.722832, 88.7228, -103.97208, -103.972084, -87.33655, 0.0, -0.0]])
+    ex_bits = rg.f32_bits(ex.astype(np.float32))
+    a = np.concatenate([a, ex_bits])
+    b = np.concatenate([b, rg.f32_bits(rng.uniform(-3, 3, ex_bits.size).astype(np.float32))])
     h = rng.integers(0, 1 << 16, a.size, dtype=np.uint32)
     e = (rng.integers(-200, 200, a.size) & 0xFFFF).astype(np.uint32)
     vectors = directory / "vectors.txt"
@@ -246,7 +252,7 @@ def test_fp32(seed, toolchain, n=20000):
     actual = np.loadtxt(results, dtype=str, ndmin=2)
     actual = np.vectorize(lambda t: int(t, 16), otypes=[np.uint64])(actual).astype(np.uint32)
     expected = rg.fp32_expected(a, b, h, e)
-    names = ("mul", "add", "i2f", "h2f", "pow2")
+    names = ("mul", "add", "i2f", "h2f", "pow2", "div", "sqrt", "f2h", "exp", "i64f", "rint")
     for col, (name, exp) in enumerate(zip(names, expected)):
         got, want = actual[:, col], rg.canonical(exp)
         bad = np.flatnonzero(got != want)

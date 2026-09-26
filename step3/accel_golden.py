@@ -3,8 +3,10 @@
 It decodes Qwen3 token by token straight from the paged DDR image built by ddr_pager, so the
 page layout, the dataflow and the number formats are all exercised end to end.
 
-Software numerics spec v0.1. Integer dots are exact; FP32 exp/sqrt/RoPE use NumPy/libm.
-An RTL SPU approximation needs its own error budget and is not yet bit-validated here.
+Software numerics spec v0.2. Integer dots are exact; add/mul/div/sqrt are IEEE binary32
+(RNE, gradual underflow). exp is the fixed float32 algorithm spu_numerics.exp_hw (<1 ULP
+measured), shared bit-for-bit with the RTL; AccelCfg(exp="numpy") restores v0.1, whose
+np.exp result depends on the CPU's SIMD code path. RoPE cos/sin tables are host inputs.
   Activation BFP  per group of 128: e = smallest int with max|x|/2^e <= 2^(A-1)-1,
                   m = round_half_even(x / 2^e), clipped to +-(2^(A-1)-1)
   VPU GEMV        P[r,g] = sum_k (q_w - zero) * m  (exact integer, fits 27 bits for A = 16)
@@ -25,6 +27,7 @@ import numpy as np
 
 from ddr_pager import DDRImage, unpack_stream, fetch_row, norm_vector_names, dequantize_sym, token_traffic
 from ref_qwen3 import rope_tables, rotate_half, validate_step
+from spu_numerics import exp_hw
 
 F32 = np.float32
 
@@ -36,12 +39,15 @@ class AccelCfg:
     lanes: int = 128           # VPU MAC lanes (only used for the cycle estimate)
     gqa_reuse: bool = True     # K/V of a kv head read once and reused by its query heads
     backend: str = "numpy"     # 'numpy' or 'torch' (CUDA) for the exact integer group dots
+    exp: str = "hw"            # 'hw': spu_numerics.exp_hw (RTL-exact); 'numpy': np.exp (v0.1)
 
     def __post_init__(self):
         if any(not isinstance(v, (int, np.integer)) or not 2 <= v <= 24 for v in (self.act_bits, self.pv_bits)):
             raise ValueError("activation and p.V mantissas must have 2..24 bits")
         if not isinstance(self.lanes, (int, np.integer)) or self.lanes <= 0 or self.backend not in ("numpy", "torch"):
             raise ValueError("lanes must be positive and backend must be numpy/torch")
+        if self.exp not in ("hw", "numpy"):
+            raise ValueError("exp must be 'hw' or 'numpy'")
 
 
 def bfp_quant(x, bits, group):
@@ -137,6 +143,7 @@ class VPU:
     def __init__(self, acfg: AccelCfg):
         self.acfg = acfg
         self.cycles = 0
+        self.exp = exp_hw if acfg.exp == "hw" else np.exp
         self.torch = None
         if acfg.backend == "torch":
             import torch
@@ -198,7 +205,7 @@ class VPU:
         P = Kq.astype(np.int64) @ m[0]
         sc = ((np.ldexp(F32(1), int(e[0])) * Ks.astype(F32)).astype(F32) * F32(d ** -0.5)).astype(F32)
         S = (P.astype(F32) * sc).astype(F32)
-        ex = np.exp((S - S.max()).astype(F32)).astype(F32)
+        ex = self.exp((S - S.max()).astype(F32)).astype(F32)
         p = (ex * (F32(1) / np.cumsum(ex, dtype=F32)[-1])).astype(F32)
         a = (p * Vs.astype(F32)).astype(F32)
         ma, ea = bfp_quant(a, self.acfg.pv_bits, a.size)
@@ -214,8 +221,9 @@ def spu_rmsnorm(x, w, eps):
     return ((x * r).astype(F32) * w).astype(F32)
 
 
-def spu_silu_mul(g, u):
-    return ((g / (F32(1) + np.exp(-g))).astype(F32) * u).astype(F32)
+def spu_silu_mul(g, u, exp=exp_hw):
+    with np.errstate(over="ignore"):
+        return ((g / (F32(1) + exp(-g))).astype(F32) * u).astype(F32)
 
 
 def kv_quant(x, bits=8):
@@ -278,7 +286,7 @@ class VirtualAccel:
             h = spu_rmsnorm(x, w_post, eps)
             g = vpu.gemv(mmu.stream(f"L{i}.gate_proj"), h, f"L{i}.g")
             u = vpu.gemv(mmu.stream(f"L{i}.up_proj"), h, f"L{i}.u")
-            x = (x + vpu.gemv(mmu.stream(f"L{i}.down_proj"), spu_silu_mul(g, u), f"L{i}.d")).astype(F32)
+            x = (x + vpu.gemv(mmu.stream(f"L{i}.down_proj"), spu_silu_mul(g, u, vpu.exp), f"L{i}.d")).astype(F32)
         h = spu_rmsnorm(x, mmu.vectors("final_norm"), eps)
         result = vpu.gemv(mmu.stream("lm_head"), h, "lm_head")
         self.img.kv_valid = pos + 1
