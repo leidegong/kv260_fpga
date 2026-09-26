@@ -2,7 +2,7 @@
 
 Status: PASS. Actual Verilator RTL simulation; no Vivado synthesis, implementation or board test.
 
-Seed 12345; 244.21 s wall; Verilator 5.48.0.dist (PyPI wheel); c++ on Linux x86_64.
+Seed 12345; 244.21 s wall; Verilator 5.48.0 (PyPI wheel); c++ on Linux x86_64.
 
 | Job | Module | Result |
 |---|---|---|
@@ -71,5 +71,5 @@ Reproduce from step3: `python3 run_rtl_tests.py --report` (`--quick` for one con
 - `rtl/tb/wr_main.cpp`: `42a1c2cc5eeca75bd147565efda433ab724bf949d78ae4506e5ae41ebfff6731`
 - `rtl/w4a16_dot.sv`: `179d3d0a68dd52e54cb5c69d1236272918c0741ac8d9f6c4dc8755bb284433bc`
 - `rtl_golden.py`: `3daafe1e3044767d2cf8ff81e0ff99a2396370354f5a2222d7d24c45a12c6b21`
-- `run_rtl_tests.py`: `875584da21cba1a68ff719e737af12d4335ece84fc747826513c497a4d22a319`
+- `run_rtl_tests.py`: `5632d2b6afd675d6b85a8d7519345d24f187e3ddeb1745b3fbd65cc6d83cff84`
 - `spu_numerics.py`: `a5f066ecb9cb9e21cc03841bdcbe8a0e6553da7a63681d55e42968c8955d7f60`
