@@ -2,7 +2,7 @@
   "status": "PASS",
   "simulator": "/workspace/repos/kv260_fpga/step3/rtl/.tools/verilator/bin/verilator_bin",
   "seed": 12345,
-  "elapsed_s": 282.12,
+  "elapsed_s": 291.26,
   "tests": [
     {
       "module": "w4a16_dot",
@@ -188,6 +188,12 @@
       "module": "dcu_issue",
       "programs": 15,
       "report": "PASS dcu_issue programs=15 bubbles=563 stalls=27 reset_mid=1 limit=512"
+    },
+    {
+      "module": "kv_addr_unit",
+      "addr_w": 49,
+      "n": 103,
+      "report": "PASS kv_addr_unit addr_w=49 n=103 cycles=1043 bubbles=264 stalled=569 resets=1"
     },
     {
       "module": "axi_write_master",

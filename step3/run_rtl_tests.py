@@ -1,4 +1,4 @@
-"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read and split_write.
+"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read, split_write and isa.kv_addr.
 
 Run: python run_rtl_tests.py [--quick] [--seed 12345]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
@@ -1179,6 +1179,207 @@ def _parse_dcu_trace(text):
     return blocks
 
 
+def test_kv_addr(seed, toolchain):
+    """Region byte base vs isa.kv_addr. Not a token-row address and not a DDR master.
+
+    ADDR_W=49 only. Expected addresses are the integers returned by kv_addr;
+    this test does not reimplement the kind offset as a second golden.
+    """
+    from ddr_pager import QuantCfg, plan_image
+    from isa import kv_addr, kv_layout
+    from model_cfg import TINY
+
+    addr_w = 49
+    limit = 1 << addr_w
+    # Hardware kind codes. The compare target is kv_addr's return value.
+    kind_name = ("K", "KS", "V", "VS")
+    if kind_name != ("K", "KS", "V", "VS"):
+        raise AssertionError("kind codes must be 0=K, 1=KS, 2=V, 3=VS")
+    try:
+        kv_addr(None, 0, 0, "Q", 1, 1)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("isa.kv_addr accepted a fifth kind")
+    if int(kv_addr(None, 0x3F, 0, "K", 524288, 8192)) != 0x3F:
+        raise AssertionError("isa.kv_addr h=0 kind=K is not the layer base")
+
+    vecs = []
+
+    def add(base, head, kind, data, scale, flags=1, layout=False, region=None):
+        base, head, kind = int(base), int(head), int(kind)
+        data, scale, flags = int(data), int(scale), int(flags)
+        if not 0 <= kind < len(kind_name):
+            raise AssertionError(f"kind code {kind}")
+        if not 0 <= head <= 0xFFFF or not 0 <= base < limit:
+            raise AssertionError("head or base is outside the port width")
+        if not 0 <= data <= 0xFFFFFFFF or not 0 <= scale <= 0xFFFFFFFF:
+            raise AssertionError("data/scale do not fit in a CFG word")
+        full = int(kv_addr(None, base, head, kind_name[kind], data, scale))
+        if full < 0:
+            raise AssertionError("kv_addr returned a negative address")
+        if full >= limit:
+            exp_addr, fault = 0, 1
+        else:
+            exp_addr, fault = full, 0
+        item = {
+            "base": base, "head": head, "kind": kind, "data": data, "scale": scale,
+            "flags": flags, "full": full, "exp_addr": exp_addr, "exp_fault": fault,
+            "layout": bool(layout),
+        }
+        if layout:
+            item["region"] = int(region)
+            if item["exp_addr"] != item["region"] or fault != 0:
+                raise AssertionError(
+                    f"L region {item['region']} != kv_addr {full}")
+        vecs.append(item)
+
+    # 524288 / 8192 are the plan KV_DATA / KV_SCALE byte counts, not a board measurement.
+    plan_data, plan_scale = 524288, 8192
+    # First two differ so the harness can check a same-cycle replacement.
+    add(0x3F, 0, 0, plan_data, plan_scale)
+    add(0x1000, 2, 1, plan_data, plan_scale)
+    for kind in range(4):
+        add(0x1000, 2, kind, plan_data, plan_scale)
+        add(0x12345, 1, kind, plan_data, plan_scale)
+        add(0x55, 0, kind, plan_data, plan_scale)
+    add(0, 0, 0, plan_data, plan_scale)
+    add(limit - 1, 0, 0, plan_data, plan_scale)
+
+    def added(head, kind, data, scale):
+        """kv_addr from a zero layer base: the part the hardware adds to layer_base."""
+        return int(kv_addr(None, 0, head, kind_name[kind], data, scale))
+
+    # Sum lands on 2^ADDR_W-1, exactly 2^ADDR_W, and 2^ADDR_W+123.
+    delta = added(3, 3, plan_data, plan_scale)
+    under_base = (limit - 1) - delta
+    over_base = limit - delta
+    residue_base = limit + 123 - delta
+    add(under_base, 3, 3, plan_data, plan_scale)
+    add(over_base, 3, 3, plan_data, plan_scale)
+    add(residue_base, 3, 3, plan_data, plan_scale)
+    if vecs[-3]["full"] != limit - 1 or vecs[-3]["exp_fault"] != 0:
+        raise AssertionError("just-under-2^ADDR_W vector was not built from kv_addr")
+    if under_base % 64 == 0:
+        raise AssertionError("just-under base happened to be 64-byte aligned")
+    if vecs[-2]["full"] != limit or vecs[-2]["exp_fault"] != 1 or vecs[-2]["exp_addr"] != 0:
+        raise AssertionError("exact 2^ADDR_W vector was not a fault")
+    if vecs[-1]["full"] != limit + 123 or (vecs[-1]["full"] % limit) == 0:
+        raise AssertionError("overflow residue vector does not stick out of ADDR_W")
+
+    # 32-bit head*stride would drop a bit at or above 2^32. Still inside ADDR_W.
+    add(0, 65535, 0, 32768, 1)
+    if not (1 << 32) <= vecs[-1]["full"] < limit or vecs[-1]["exp_fault"] != 0:
+        raise AssertionError("wide in-range product does not leave 32 bits")
+    # Product does not fit in ADDR_W. A truncated low part must not be returned.
+    add(0, 65535, 3, 0xFFFFFFFF, 0xFFFFFFFF)
+    if vecs[-1]["full"] < limit or (vecs[-1]["full"] % limit) == 0 or vecs[-1]["exp_addr"] != 0:
+        raise AssertionError("huge product is not a nonzero-residue fault")
+    # Reset drops this pending fault. The next beat must still match kv_addr.
+    add(limit - 1, 65535, 3, 0xFFFFFFFF, 0xFFFFFFFF, flags=1 | 2)
+    add(0x2B, 0, 0, 7, 9)
+
+    for kind in range(4):
+        add(64 + 3, 4, kind, 0, plan_scale)
+        add(128 + 1, 4, kind, plan_data, 0)
+
+    rng = np.random.default_rng(seed)
+    for _ in range(24):
+        add(int(rng.integers(0, 1 << 32)), int(rng.integers(0, 16)),
+            int(rng.integers(0, 4)), int(rng.integers(0, 1 << 18)),
+            int(rng.integers(0, 1 << 16)))
+    for _ in range(24):
+        add(int(rng.integers(0, limit)), int(rng.integers(0, 1 << 16)),
+            int(rng.integers(0, 4)), int(rng.integers(0, 1 << 32)),
+            int(rng.integers(0, 1 << 32)))
+
+    img = plan_image(TINY, QuantCfg())
+    lay_data, lay_scale = (int(v) for v in kv_layout(img))
+    n_layout = 0
+    for layer in range(img.cfg.layers):
+        layer_base = int(img.regions[f"L{layer}.K0"].offset)
+        for head in range(img.cfg.n_kv):
+            for kind, name in enumerate(kind_name):
+                region = int(img.regions[f"L{layer}.{name}{head}"].offset)
+                add(layer_base, head, kind, lay_data, lay_scale, layout=True, region=region)
+                n_layout += 1
+    if n_layout == 0:
+        raise AssertionError("tiny DDRImage produced no KV regions")
+
+    saw = {name: False for name in
+           ("k0", "unalign", "below", "over", "residue", "wide", "reset", "layout")}
+    plan_kinds = set()
+    for index, vec in enumerate(vecs):
+        if (vec["head"] == 0 and vec["kind"] == 0 and vec["exp_fault"] == 0
+                and vec["exp_addr"] == vec["base"] == vec["full"]):
+            saw["k0"] = True
+        if (vec["head"] >= 1 and vec["data"] == plan_data and vec["scale"] == plan_scale
+                and vec["exp_fault"] == 0):
+            plan_kinds.add(vec["kind"])
+        if vec["base"] % 64 != 0 and vec["exp_fault"] == 0 and vec["exp_addr"] == vec["full"]:
+            saw["unalign"] = True
+        if vec["full"] == limit - 1 and vec["exp_fault"] == 0 and vec["exp_addr"] == limit - 1:
+            saw["below"] = True
+        if vec["full"] >= limit and vec["exp_fault"] == 1 and vec["exp_addr"] == 0:
+            saw["over"] = True
+        if (vec["full"] >= limit and (vec["full"] % limit) != 0
+                and vec["exp_fault"] == 1 and vec["exp_addr"] == 0):
+            saw["residue"] = True
+        if (vec["head"] == 65535 and vec["kind"] == 0 and vec["data"] == 32768
+                and vec["scale"] == 1 and vec["full"] >= (1 << 32) and vec["exp_fault"] == 0):
+            saw["wide"] = True
+        if vec["flags"] & 2:
+            if index + 1 >= len(vecs) or (vecs[index + 1]["flags"] & 2):
+                raise AssertionError("a reset beat must be followed by another transaction")
+            saw["reset"] = True
+        if vec["layout"]:
+            saw["layout"] = True
+    if plan_kinds != {0, 1, 2, 3}:
+        raise AssertionError(f"plan KV_DATA/KV_SCALE kinds missing: {sorted(plan_kinds)}")
+    missing = [name for name, ok in saw.items() if not ok]
+    if missing:
+        raise AssertionError(f"kv_addr vector set is missing {missing}")
+    if vecs[0]["exp_addr"] == vecs[1]["exp_addr"] and vecs[0]["exp_fault"] == vecs[1]["exp_fault"]:
+        raise AssertionError("first two vectors do not differ")
+
+    directory, binary, env = build(
+        "kv_addr_unit", {"ADDR_W": addr_w}, "kv_addr_main.cpp",
+        {"KV_ADDR_W": addr_w}, *toolchain)
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"KV1\n{len(vecs)}\n")
+        for vec in vecs:
+            out.write(f"{vec['flags']:x} {vec['base']:x} {vec['head']:x} {vec['kind']:x} "
+                      f"{vec['data']:x} {vec['scale']:x} {vec['exp_addr']:x} {vec['exp_fault']:x}\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+
+    def field(key):
+        for tok in report.split():
+            if tok.startswith(key + "="):
+                return int(tok.split("=", 1)[1])
+        raise AssertionError(f"kv_addr report missing {key}: {report}")
+
+    if field("addr_w") != addr_w or field("n") != len(vecs):
+        raise AssertionError(f"kv_addr report does not match the vector file: {report}")
+    if field("bubbles") <= 0 or field("stalled") <= 0 or field("resets") <= 0:
+        raise AssertionError(f"kv_addr handshake was not exercised: {report}")
+    lines = [ln.split() for ln in results.read_text(encoding="ascii").splitlines() if ln.strip()]
+    if len(lines) != len(vecs):
+        raise AssertionError(f"kv_addr results {len(lines)} != {len(vecs)}")
+    for index, (parts, vec) in enumerate(zip(lines, vecs)):
+        if len(parts) != 2:
+            raise AssertionError(f"kv_addr result line {index}")
+        got_addr = int(parts[0], 16)
+        got_fault = int(parts[1], 16)
+        if got_addr != vec["exp_addr"] or got_fault != vec["exp_fault"]:
+            raise AssertionError(
+                f"kv_addr[{index}] rtl {got_addr:#x} fault {got_fault} != "
+                f"kv_addr {vec['full']:#x} -> addr {vec['exp_addr']:#x} fault {vec['exp_fault']}")
+    print(report, flush=True)
+    return {"module": "kv_addr_unit", "addr_w": addr_w, "n": len(vecs), "report": report}
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -1217,6 +1418,8 @@ def write_rtl_report(summary):
             config = f"DATA_W={test['data_w']}, jobs={test['jobs']}"
         elif module == "dcu_issue":
             config = f"programs={test['programs']}"
+        elif module == "kv_addr_unit":
+            config = f"ADDR_W={test['addr_w']}, n={test['n']}"
         elif "max_beats" in test:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
         else:
@@ -1242,6 +1445,8 @@ def write_rtl_report(summary):
         "",
         "dcu_issue 只译码/发射，不对拍 VPU.gemv，不执行算子。",
         "",
+        "kv_addr_unit 只对拍 isa.kv_addr 的字节区基址，不是 KV 行地址，没有 DDR PHY / 多 HP / tok/s。",
+        "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
         "Reproduce from step3: `python3 run_rtl_tests.py`.",
@@ -1254,10 +1459,12 @@ def write_rtl_report(summary):
         "rtl/gemv_tile.sv", "rtl/fp32_pkg.sv", "rtl/fp32_rsqrt.sv", "rtl/fp32_exp.sv",
         "rtl/spu_rmsnorm.sv", "rtl/spu_silu_mul.sv", "rtl/axi_page_bridge.sv",
         "rtl/axi_read_master.sv", "rtl/axi_write_master.sv", "rtl/dcu_issue.sv",
+        "rtl/kv_addr_unit.sv",
         "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
         "rtl/tb/gemv_tile_main.cpp", "rtl/tb/spu_rmsnorm_main.cpp", "rtl/tb/spu_silu_main.cpp",
         "rtl/tb/fp32_unary_main.cpp", "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp",
-        "rtl/tb/axi_page_main.cpp", "rtl/tb/dcu_issue_main.cpp", "rtl/tb/sim_common.h",
+        "rtl/tb/axi_page_main.cpp", "rtl/tb/dcu_issue_main.cpp", "rtl/tb/kv_addr_main.cpp",
+        "rtl/tb/sim_common.h",
         "run_rtl_tests.py", "rtl_spu_golden.py", "kv260/axi_plan.py",
     ):
         digest = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
@@ -1268,7 +1475,7 @@ def write_rtl_report(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + one AXI rw")
+    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + dcu_issue + kv_addr (ADDR_W=49) + one AXI rw")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -1296,6 +1503,8 @@ def main():
     axi_cfgs = [(128, 256)] if args.quick else [(128, 256), (128, 16), (64, 256), (32, 16)]
     reports += [test_axi(width, beats, args.seed, toolchain) for width, beats in axi_cfgs]
     reports.append(test_dcu_issue(args.seed, toolchain))
+    # One ADDR_W=49 configuration on both --quick and the full matrix.
+    reports.append(test_kv_addr(args.seed, toolchain))
     axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
     reports += [test_axi_write(width, beats, args.seed, toolchain) for width, beats in axi_wr_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
