@@ -1,4 +1,4 @@
-"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read, split_write and isa.kv_addr.
+"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read, split_write, isa.kv_addr and the MMU._kv row view.
 
 Run: python run_rtl_tests.py [--quick] [--seed 12345]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
@@ -1380,6 +1380,318 @@ def test_kv_addr(seed, toolchain):
     return {"module": "kv_addr_unit", "addr_w": addr_w, "n": len(vecs), "report": report}
 
 
+def test_kv_row(seed, toolchain):
+    """In-region token-row byte offset vs the MMU._kv NumPy view.
+
+    OFF_W=49 only. Legal expected values are pointer differences on that view
+    (cross-checked with byte_bounds). The C-contiguous product is an assertion,
+    not the number written into the vector file. A product that does not fit
+    is a fault: the file stores zeros, not a truncated residue. plan_image
+    region bases are not added.
+    """
+    from ddr_pager import QuantCfg, plan_image
+    from model_cfg import TINY
+    try:
+        from numpy.lib.array_utils import byte_bounds
+    except ImportError:  # NumPy 1.x
+        from numpy import byte_bounds
+
+    off_w = 49
+    limit = 1 << off_w
+    max_measure = 16 * 1024 * 1024
+
+    def formula(pos, head_dim, kv_bits):
+        item = int(np.dtype(np.int8 if kv_bits == 8 else np.int16).itemsize)
+        return pos * head_dim * item, pos * int(np.dtype(np.float16).itemsize), head_dim * item
+
+    def measure_views(raw, scale_raw, ctx, head_dim, kv_bits, pos):
+        dt = np.int8 if kv_bits == 8 else np.int16
+        item = int(np.dtype(dt).itemsize)
+        if item != kv_bits // 8:
+            raise AssertionError("dtype itemsize is not kv_bits/8")
+        if int(raw.size) != ctx * head_dim * item:
+            raise AssertionError("data region length is not ctx*head_dim*itemsize")
+        if int(scale_raw.size) != ctx * 2:
+            raise AssertionError("scale region length is not ctx*2")
+        data = raw.view(dt).reshape(ctx, head_dim)
+        scale = scale_raw.view(np.float16)
+        if data.shape != (ctx, head_dim) or data.dtype != dt or not data.flags["C_CONTIGUOUS"]:
+            raise AssertionError("data view is not the C reshape(ctx, head_dim)")
+        if scale.shape != (ctx,) or scale.dtype != np.float16 or not scale.flags["C_CONTIGUOUS"]:
+            raise AssertionError("scale view is not float16[ctx]")
+        if data.strides != (head_dim * item, item) or scale.strides != (np.dtype(np.float16).itemsize,):
+            raise AssertionError("view strides are not C contiguous")
+        if int(data.ctypes.data) != int(raw.ctypes.data):
+            raise AssertionError("data view does not start at the uint8 region")
+        if int(scale.ctypes.data) != int(scale_raw.ctypes.data):
+            raise AssertionError("scale view does not start at the scale region")
+        row = data[pos]
+        scale_item = scale[pos:pos + 1]
+        if not np.shares_memory(row, raw) or not np.shares_memory(scale_item, scale_raw):
+            raise AssertionError("row/scale item is not a view")
+        data_off = int(row.ctypes.data - raw.ctypes.data)
+        scale_off = int(scale_item.ctypes.data - scale_raw.ctypes.data)
+        data_bb = int(byte_bounds(row)[0] - byte_bounds(raw)[0])
+        scale_bb = int(byte_bounds(scale_item)[0] - byte_bounds(scale_raw)[0])
+        if data_off != data_bb or scale_off != scale_bb:
+            raise AssertionError("ctypes pointer difference and byte_bounds disagree")
+        row_bytes = int(row.nbytes)
+        if int(scale_item.nbytes) != int(np.dtype(np.float16).itemsize):
+            raise AssertionError("scale[pos] is not one float16")
+        expect = formula(pos, head_dim, kv_bits)
+        if (data_off, scale_off, row_bytes) != expect:
+            raise AssertionError(
+                f"measured {(data_off, scale_off, row_bytes)} != C-contiguous {expect}")
+        return data_off, scale_off, row_bytes
+
+    def measure_alloc(ctx, head_dim, kv_bits, pos):
+        item = kv_bits // 8
+        nbytes = ctx * head_dim * item
+        scale_n = ctx * 2
+        if nbytes > max_measure or scale_n > max_measure:
+            raise AssertionError("legal vector is too large to measure with a real NumPy view")
+        raw = np.zeros(nbytes, np.uint8)
+        scale_raw = np.zeros(scale_n, np.uint8)
+        return measure_views(raw, scale_raw, ctx, head_dim, kv_bits, pos)
+
+    vecs = []
+
+    def add_measured(pos, ctx, head_dim, kv_bits, flags=1, layout=False,
+                     raw=None, scale_raw=None, region_off=None, region_nbytes=None):
+        pos, ctx, head_dim, kv_bits, flags = (int(v) for v in (pos, ctx, head_dim, kv_bits, flags))
+        if kv_bits not in (8, 16) or ctx <= 0 or head_dim <= 0 or not 0 <= pos < ctx:
+            raise AssertionError("add_measured requires an in-range 8/16 row")
+        if raw is None:
+            data_off, scale_off, row_bytes = measure_alloc(ctx, head_dim, kv_bits, pos)
+        else:
+            data_off, scale_off, row_bytes = measure_views(
+                raw, scale_raw, ctx, head_dim, kv_bits, pos)
+        if data_off >= limit or scale_off >= limit or row_bytes >= (1 << 32):
+            raise AssertionError("measurement does not fit the ports")
+        item = {
+            "pos": pos, "ctx": ctx, "head_dim": head_dim, "kv_bits": kv_bits, "flags": flags,
+            "exp_data": data_off, "exp_scale": scale_off, "exp_row": row_bytes, "exp_fault": 0,
+            "layout": bool(layout),
+        }
+        if layout:
+            item["region_off"] = int(region_off)
+            item["region_nbytes"] = int(region_nbytes)
+            if item["exp_data"] >= item["region_nbytes"]:
+                raise AssertionError("measured data offset is outside the K region")
+            if item["region_off"] == 0:
+                raise AssertionError("K region base is 0; refusing a vacuous no-base check")
+            # Compared value is the in-region measurement, not base + offset.
+            if item["exp_data"] + item["region_off"] == item["exp_data"]:
+                raise AssertionError("adding the region base did not change the offset")
+        vecs.append(item)
+
+    def add_fault(pos, ctx, head_dim, kv_bits, flags=1):
+        pos, ctx, head_dim, kv_bits, flags = (int(v) for v in (pos, ctx, head_dim, kv_bits, flags))
+        if not all(0 <= v <= 0xFFFFFFFF for v in (pos, ctx, head_dim)) or not 0 <= kv_bits <= 0xFF:
+            raise AssertionError("fault input does not fit the port")
+        vecs.append({
+            "pos": pos, "ctx": ctx, "head_dim": head_dim, "kv_bits": kv_bits, "flags": flags,
+            "exp_data": 0, "exp_scale": 0, "exp_row": 0, "exp_fault": 1, "layout": False,
+        })
+
+    # First two differ so the harness can check a same-cycle replacement.
+    # head_dim=1 is odd on purpose: the reshape has no extra alignment rule.
+    add_measured(0, 4, 2, 8)
+    add_measured(1, 4, 1, 8)
+
+    for kv_bits in (8, 16):
+        add_measured(0, 4, 2, kv_bits)       # pos 0, even head_dim
+        add_measured(3, 4, 2, kv_bits)       # pos = ctx-1
+        add_measured(0, 5, 128, kv_bits)     # even, model-shaped head_dim
+        add_measured(4, 5, 128, kv_bits)
+        add_measured(2, 4, 3, kv_bits)       # odd head_dim
+        add_measured(0, 3, 1, kv_bits)
+
+    # pos >= ctx, kv_bits not 8/16, ctx==0, head_dim==0.
+    add_fault(5, 5, 4, 8)
+    add_fault(8, 7, 4, 16)
+    add_fault(0, 4, 2, 4)
+    add_fault(1, 4, 2, 0)
+    add_fault(0, 0, 128, 8)
+    add_fault(3, 0, 2, 16)
+    add_fault(0, 8, 0, 8)
+    add_fault(3, 8, 0, 16)
+
+    def note_overflow(pos, ctx, head_dim, kv_bits):
+        """Confirm a wide product. The vector file still stores fault zeros."""
+        if kv_bits not in (8, 16) or ctx == 0 or head_dim == 0 or pos >= ctx:
+            raise AssertionError("overflow case must be legal except for the wide product")
+        data_off, scale_off, row_bytes = formula(pos, head_dim, kv_bits)
+        if data_off < limit and scale_off < limit and row_bytes < (1 << 32):
+            raise AssertionError("vector fits in the ports; it is not an overflow fault")
+        if ctx * head_dim * (kv_bits // 8) <= max_measure:
+            raise AssertionError("overflow vector unexpectedly fits in the measure cap")
+        return data_off, scale_off, row_bytes
+
+    # Exact 2^OFF_W, and a residue whose low 32 bits are nonzero. Both fault as 0.
+    exact8 = note_overflow(1 << 29, (1 << 29) + 1, 1 << 20, 8)
+    if exact8[0] != limit or (exact8[0] & (limit - 1)) != 0:
+        raise AssertionError("kv_bits=8 product is not exactly 2^OFF_W")
+    add_fault(1 << 29, (1 << 29) + 1, 1 << 20, 8)
+
+    res8_pos = (1 << 29) + 17
+    res8 = note_overflow(res8_pos, res8_pos + 1, 1 << 20, 8)
+    if res8[0] < limit or (res8[0] % (1 << 32)) == 0 or (res8[0] & (limit - 1)) == 0:
+        raise AssertionError("kv_bits=8 residue does not stick out of OFF_W and 32 bits")
+    add_fault(res8_pos, res8_pos + 1, 1 << 20, 8, flags=1 | 2)
+    # The beat after reset is a measured row, so a stuck zero would fail.
+    add_measured(2, 6, 5, 16)
+
+    exact16 = note_overflow(1 << 31, (1 << 31) + 1, 1 << 17, 16)
+    if exact16[0] != limit:
+        raise AssertionError("kv_bits=16 product is not exactly 2^OFF_W")
+    add_fault(1 << 31, (1 << 31) + 1, 1 << 17, 16)
+
+    res16_pos = (1 << 28) + 9
+    res16 = note_overflow(res16_pos, res16_pos + 1, 1 << 20, 16)
+    if res16[0] < limit or (res16[0] % (1 << 32)) == 0:
+        raise AssertionError("kv_bits=16 residue does not stick out of 32 bits")
+    add_fault(res16_pos, res16_pos + 1, 1 << 20, 16)
+
+    # data[pos].nbytes == 2^32 does not fit the 32-bit port. pos=0 offsets are 0.
+    # Not allocated. Fault, rather than a truncated 0 with m_fault=0.
+    row_wide_hd = 1 << 31
+    if formula(0, row_wide_hd, 16) != (0, 0, 1 << 32):
+        raise AssertionError("wide row count was not exactly 2^32 at pos 0")
+    add_fault(0, 1, row_wide_hd, 16)
+
+    rng = np.random.default_rng(seed)
+    for _ in range(24):
+        kv_bits = 8 if int(rng.integers(0, 2)) == 0 else 16
+        head_dim = int(rng.integers(1, 40))
+        ctx = int(rng.integers(1, 48))
+        pos = int(rng.integers(0, ctx))
+        add_measured(pos, ctx, head_dim, kv_bits)
+
+    img = plan_image(TINY, QuantCfg())
+    ctx = int(img.q.ctx_max)
+    head_dim = int(img.cfg.head_dim)
+    kv_bits = int(img.q.kv_bits)
+    region = img.regions["L0.K0"]
+    scale_region = img.regions["L0.KS0"]
+    expect_n = ctx * head_dim * kv_bits // 8
+    if int(region.nbytes) != expect_n:
+        raise AssertionError(
+            f"L0.K0 nbytes {region.nbytes} != ctx*head_dim*kv_bits/8 {expect_n}")
+    if int(scale_region.nbytes) != ctx * 2:
+        raise AssertionError(f"L0.KS0 nbytes {scale_region.nbytes} != ctx*2")
+    if kv_bits not in (8, 16) or head_dim % 2 != 0:
+        raise AssertionError("TINY plan is not an even-head 8/16 KV region")
+    pos = ctx - 1
+    raw = np.zeros(int(region.nbytes), np.uint8)
+    scale_raw = np.zeros(int(scale_region.nbytes), np.uint8)
+    measured = measure_views(raw, scale_raw, ctx, head_dim, kv_bits, pos)
+    again = measure_alloc(ctx, head_dim, kv_bits, pos)
+    if measured != again:
+        raise AssertionError("region-length reshape does not match a fresh allocation")
+    add_measured(pos, ctx, head_dim, kv_bits, layout=True, raw=raw, scale_raw=scale_raw,
+                 region_off=int(region.offset), region_nbytes=int(region.nbytes))
+    if (vecs[-1]["exp_data"], vecs[-1]["exp_scale"], vecs[-1]["exp_row"]) != measured:
+        raise AssertionError("layout vector did not store the region-length measurement")
+    if vecs[-1]["exp_data"] == int(region.offset):
+        raise AssertionError("in-region offset collided with the K region base")
+
+    saw = {name: False for name in (
+        "k8", "k16", "pos0", "pos_last", "even", "odd", "pos_ge", "bits_bad",
+        "ctx0", "hd0", "over", "residue", "row_wide", "reset", "layout",
+    )}
+    for index, vec in enumerate(vecs):
+        legal = vec["exp_fault"] == 0
+        if legal and vec["kv_bits"] == 8:
+            saw["k8"] = True
+        if legal and vec["kv_bits"] == 16:
+            saw["k16"] = True
+        if legal and vec["pos"] == 0:
+            saw["pos0"] = True
+        if legal and vec["pos"] == vec["ctx"] - 1:
+            saw["pos_last"] = True
+        if legal and vec["head_dim"] % 2 == 0:
+            saw["even"] = True
+        if legal and vec["head_dim"] % 2 == 1:
+            saw["odd"] = True
+        if (vec["exp_fault"] and vec["ctx"] != 0 and vec["pos"] >= vec["ctx"]
+                and vec["kv_bits"] in (8, 16) and vec["head_dim"] != 0):
+            saw["pos_ge"] = True
+        if vec["exp_fault"] and vec["kv_bits"] in (0, 4):
+            saw["bits_bad"] = True
+        if vec["exp_fault"] and vec["ctx"] == 0:
+            saw["ctx0"] = True
+        if vec["exp_fault"] and vec["head_dim"] == 0 and vec["ctx"] != 0:
+            saw["hd0"] = True
+        if (vec["exp_fault"] and vec["kv_bits"] in (8, 16) and vec["ctx"] != 0
+                and vec["head_dim"] != 0 and vec["pos"] < vec["ctx"]):
+            data_off, scale_off, row_bytes = formula(vec["pos"], vec["head_dim"], vec["kv_bits"])
+            if (vec["exp_data"], vec["exp_scale"], vec["exp_row"]) != (0, 0, 0):
+                raise AssertionError("wide product was stored instead of fault zeros")
+            if data_off >= limit or scale_off >= limit:
+                saw["over"] = True
+                if (data_off & (limit - 1)) != 0 and (data_off % (1 << 32)) != 0:
+                    saw["residue"] = True
+            if row_bytes >= (1 << 32) and data_off < limit and scale_off < limit:
+                saw["row_wide"] = True
+        if vec["flags"] & 2:
+            if index + 1 >= len(vecs) or vecs[index + 1]["exp_fault"] != 0:
+                raise AssertionError("a reset beat must be followed by a measured success")
+            if vecs[index + 1]["exp_row"] == 0 and vecs[index + 1]["exp_data"] == 0:
+                raise AssertionError("post-reset beat is all zeros")
+            saw["reset"] = True
+        if vec["layout"]:
+            saw["layout"] = True
+    if not any(v["exp_fault"] == 0 and v["kv_bits"] == 8 and v["head_dim"] % 2 == 1
+               and v["exp_data"] % 2 == 1 for v in vecs):
+        raise AssertionError("no odd byte data offset; an alignment rule would not be caught")
+    missing = [name for name, ok in saw.items() if not ok]
+    if missing:
+        raise AssertionError(f"kv_row vector set is missing {missing}")
+    if vecs[0]["exp_fault"] or vecs[1]["exp_fault"]:
+        raise AssertionError("overlap pair must be successful measurements")
+    if (vecs[0]["exp_data"], vecs[0]["exp_scale"], vecs[0]["exp_row"], vecs[0]["exp_fault"]) == (
+            vecs[1]["exp_data"], vecs[1]["exp_scale"], vecs[1]["exp_row"], vecs[1]["exp_fault"]):
+        raise AssertionError("first two vectors do not differ")
+
+    directory, binary, env = build(
+        "kv_row_off", {"OFF_W": off_w}, "kv_row_main.cpp",
+        {"KV_OFF_W": off_w}, *toolchain)
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"KR1\n{len(vecs)}\n")
+        for vec in vecs:
+            # Legal exp_* are the NumPy measurements. Faults are zeros, not a residue.
+            out.write(
+                f"{vec['flags']:x} {vec['pos']:x} {vec['ctx']:x} {vec['head_dim']:x} {vec['kv_bits']:x} "
+                f"{vec['exp_data']:x} {vec['exp_scale']:x} {vec['exp_row']:x} {vec['exp_fault']:x}\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+
+    def field(key):
+        for tok in report.split():
+            if tok.startswith(key + "="):
+                return int(tok.split("=", 1)[1])
+        raise AssertionError(f"kv_row report missing {key}: {report}")
+
+    if field("off_w") != off_w or field("n") != len(vecs):
+        raise AssertionError(f"kv_row report does not match the vector file: {report}")
+    if field("bubbles") <= 0 or field("stalled") <= 0 or field("resets") <= 0:
+        raise AssertionError(f"kv_row handshake was not exercised: {report}")
+    lines = [ln.split() for ln in results.read_text(encoding="ascii").splitlines() if ln.strip()]
+    if len(lines) != len(vecs):
+        raise AssertionError(f"kv_row results {len(lines)} != {len(vecs)}")
+    for index, (parts, vec) in enumerate(zip(lines, vecs)):
+        if len(parts) != 4:
+            raise AssertionError(f"kv_row result line {index}")
+        got = (int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), int(parts[3], 16))
+        exp = (vec["exp_data"], vec["exp_scale"], vec["exp_row"], vec["exp_fault"])
+        if got != exp:
+            raise AssertionError(f"kv_row[{index}] rtl {got} != measured {exp}")
+    print(report, flush=True)
+    return {"module": "kv_row_off", "off_w": off_w, "n": len(vecs), "report": report}
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -1420,6 +1732,8 @@ def write_rtl_report(summary):
             config = f"programs={test['programs']}"
         elif module == "kv_addr_unit":
             config = f"ADDR_W={test['addr_w']}, n={test['n']}"
+        elif module == "kv_row_off":
+            config = f"OFF_W={test['off_w']}, n={test['n']}"
         elif "max_beats" in test:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
         else:
@@ -1447,6 +1761,8 @@ def write_rtl_report(summary):
         "",
         "kv_addr_unit 只对拍 isa.kv_addr 的字节区基址，不是 KV 行地址，没有 DDR PHY / 多 HP / tok/s。",
         "",
+        "kv_row_off 只对拍区内 token 行偏移（MMU._kv 的 reshape(ctx, head_dim) 与 scale[pos] 的字节偏移，以及 data[pos].nbytes），不加区基址，没有 DDR / 多 HP / tok/s。",
+        "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
         "Reproduce from step3: `python3 run_rtl_tests.py`.",
@@ -1459,11 +1775,12 @@ def write_rtl_report(summary):
         "rtl/gemv_tile.sv", "rtl/fp32_pkg.sv", "rtl/fp32_rsqrt.sv", "rtl/fp32_exp.sv",
         "rtl/spu_rmsnorm.sv", "rtl/spu_silu_mul.sv", "rtl/axi_page_bridge.sv",
         "rtl/axi_read_master.sv", "rtl/axi_write_master.sv", "rtl/dcu_issue.sv",
-        "rtl/kv_addr_unit.sv",
+        "rtl/kv_addr_unit.sv", "rtl/kv_row_off.sv",
         "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
         "rtl/tb/gemv_tile_main.cpp", "rtl/tb/spu_rmsnorm_main.cpp", "rtl/tb/spu_silu_main.cpp",
         "rtl/tb/fp32_unary_main.cpp", "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp",
         "rtl/tb/axi_page_main.cpp", "rtl/tb/dcu_issue_main.cpp", "rtl/tb/kv_addr_main.cpp",
+        "rtl/tb/kv_row_main.cpp",
         "rtl/tb/sim_common.h",
         "run_rtl_tests.py", "rtl_spu_golden.py", "kv260/axi_plan.py",
     ):
@@ -1475,7 +1792,7 @@ def write_rtl_report(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + dcu_issue + kv_addr (ADDR_W=49) + one AXI rw")
+    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + dcu_issue + kv_addr (ADDR_W=49) + kv_row (OFF_W=49) + one AXI rw")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -1505,6 +1822,8 @@ def main():
     reports.append(test_dcu_issue(args.seed, toolchain))
     # One ADDR_W=49 configuration on both --quick and the full matrix.
     reports.append(test_kv_addr(args.seed, toolchain))
+    # One OFF_W=49 configuration on both --quick and the full matrix.
+    reports.append(test_kv_row(args.seed, toolchain))
     axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
     reports += [test_axi_write(width, beats, args.seed, toolchain) for width, beats in axi_wr_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,
