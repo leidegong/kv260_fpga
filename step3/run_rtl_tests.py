@@ -949,6 +949,236 @@ def test_axi_page(seed, toolchain):
     return {"module": "axi_page_bridge", "data_w": width, "jobs": len(jobs), "report": report}
 
 
+def test_dcu_issue(seed, toolchain):
+    """Decode / CFG / issue until END. Vectors are isa.Instr.encode(), not hand-sliced fields.
+
+    The leaf does not execute operators and is not checked against VPU.gemv.
+    """
+    from isa import FIELDS, F_ACC, F_W8, Instr, Op, Reg
+
+    directory, binary, env = build("dcu_issue", {}, "dcu_issue_main.cpp", {}, *toolchain)
+    op_shift = sum(width for _, width in FIELDS[1:])
+    op_width = FIELDS[0][1]
+    issue_ops = {Op.EMB, Op.VLOAD, Op.RMSN, Op.ROPE, Op.GEMV, Op.KVW, Op.ATTN, Op.SILU, Op.ADD}
+
+    def pack(ins):
+        raw = int(ins.encode())
+        back = Instr.decode(raw)
+        if back != ins:
+            raise AssertionError(f"encode/decode mismatch: {ins} vs {back}")
+        if raw >= 1 << 128 or (raw & 0xFFFFFFFF) != (int(ins.addr) & 0xFFFFFFFF):
+            raise AssertionError("encoded instruction is not a 128-bit value with addr in [31:0]")
+        if ((raw >> op_shift) & ((1 << op_width) - 1)) != int(ins.op):
+            raise AssertionError("op is not the top FIELDS slice")
+        text = f"{raw:032x}"
+        if len(text) != 32 or text[-8:] != f"{int(ins.addr) & 0xFFFFFFFF:08x}":
+            raise AssertionError("word0 of the hex vector is not addr")
+        return text
+
+    def pack_bad_op(op, **kwargs):
+        raw = int(pack(Instr(Op.NOP, **kwargs)), 16)
+        raw = (raw & ~(((1 << op_width) - 1) << op_shift)) | ((int(op) & ((1 << op_width) - 1)) << op_shift)
+        if ((raw >> op_shift) & ((1 << op_width) - 1)) != int(op):
+            raise AssertionError("failed to plant an illegal opcode")
+        try:
+            Instr.decode(raw)
+        except ValueError:
+            return raw
+        raise AssertionError(f"opcode {op} should not decode")
+
+    def issue_of(ins):
+        return (int(ins.op), int(ins.flags), int(ins.dst), int(ins.src0), int(ins.src1),
+                int(ins.n), int(ins.aux), int(ins.addr) & 0xFFFFFFFF)
+
+    def cfg_words(writes):
+        words = [0] * 16
+        for idx, value in writes.items():
+            idx = int(idx)
+            if not 0 <= idx <= 12:
+                raise AssertionError(f"CFG index {idx} is outside 0..12")
+            words[idx] = int(value) & 0xFFFFFFFF
+        return words
+
+    scenarios = []
+    expected = []
+
+    def add_run(name, items, writes, done, fault, stall=0, reset=1):
+        words = []
+        issues = []
+        for item in items:
+            if isinstance(item, Instr):
+                words.append(pack(item))
+                if item.op in issue_ops:
+                    issues.append(issue_of(item))
+            else:
+                words.append(f"{int(item):032x}")
+        pc = len(words) - 1
+        cfg = cfg_words(writes)
+        scenarios.append({
+            "kind": 0, "name": name, "reset": reset, "stall": stall,
+            "words": words, "done": int(done), "fault": int(fault), "pc": pc,
+            "cfg": cfg, "issues": issues,
+        })
+        expected.append({
+            "name": name, "done": int(done), "fault": int(fault), "pc": pc,
+            "busy": 0, "cfg": cfg, "issues": issues,
+        })
+
+    page = Instr(Op.CFG, aux=int(Reg.PAGE), addr=0x80001000)
+    nop = Instr(Op.NOP)
+    head = Instr(Op.CFG, aux=int(Reg.HEAD_DIM), addr=0x00000040)
+    eps = Instr(Op.CFG, aux=int(Reg.EPS), addr=0xFF800000)
+    batch = Instr(Op.CFG, aux=int(Reg.BATCH), addr=0xC0000002)
+    # Nonzero flags/dst on CFG are ignored: still a register write, still not issued.
+    group = Instr(Op.CFG, flags=0x3, dst=0x11, src0=0x22, src1=0x33, n=0x44,
+                  aux=int(Reg.GROUP), addr=0x00000080)
+    gemv = Instr(Op.GEMV, F_ACC | F_W8, dst=0x12345, src0=0x23456, src1=0x04567,
+                 n=0x11111, aux=0x0AB, addr=0x89ABCDEF)
+    silu = Instr(Op.SILU, flags=0x20, dst=0x10, src0=0x20, src1=0x30, n=0x300, aux=0x5, addr=0x1)
+    add = Instr(Op.ADD, flags=0x3F, dst=0x3FFFF, src0=0x2AAAA, src1=0x15555,
+                n=0x3FFFE, aux=0xFFF, addr=0x01020304)
+    end = Instr(Op.END)
+    happy_writes = {
+        int(Reg.PAGE): page.addr, int(Reg.HEAD_DIM): head.addr, int(Reg.EPS): eps.addr,
+        int(Reg.BATCH): batch.addr, int(Reg.GROUP): group.addr,
+    }
+    add_run("cfg_issue", [page, nop, head, eps, nop, batch, group, gemv, silu, add, end],
+            happy_writes, done=1, fault=0, stall=1)
+    # Accepted start clears done/fault and pc, but not CFG.
+    add_run("restart_end", [end], happy_writes, done=1, fault=0, reset=0)
+
+    bad11 = pack_bad_op(11, flags=0x11, dst=0x123, src0=0x45, src1=0x67, n=0x89, aux=0xAB, addr=0x11111111)
+    bad_writes = {int(Reg.PAGE): 0xA5A5F00D}
+    add_run("bad_op", [Instr(Op.CFG, aux=int(Reg.PAGE), addr=0xA5A5F00D), bad11],
+            bad_writes, done=0, fault=1)
+    add_run("restart_after_fault", [end], bad_writes, done=1, fault=0, reset=0)
+
+    add_run("bad_aux", [Instr(Op.CFG, aux=13, addr=0xFFFFFFFF)], {}, done=0, fault=1)
+    add_run("bad_aux_alias", [Instr(Op.CFG, aux=16, addr=0xA5A5A5A5)], {}, done=0, fault=1)
+    add_run("bad_aux_hi", [Instr(Op.CFG, aux=0xFFF, addr=0x12345678)], {}, done=0, fault=1)
+    for illegal in (14, 16, 63):
+        add_run(f"bad_op_{illegal}", [pack_bad_op(illegal, dst=illegal, addr=0x22220000 + illegal)],
+                {}, done=0, fault=1)
+
+    add_run("end_only", [end], {}, done=1, fault=0)
+
+    all_ops = [
+        Instr(Op.NOP, flags=0x1),
+        Instr(Op.EMB, flags=0x1, dst=1, src0=2, src1=3, n=4, aux=5, addr=0x1000),
+        Instr(Op.VLOAD, flags=0x2, dst=6, src0=7, src1=8, n=9, aux=10, addr=0x2000),
+        Instr(Op.RMSN, flags=0x3, dst=11, src0=12, src1=13, n=14, aux=15, addr=0x3000),
+        Instr(Op.ROPE, flags=0x4, dst=16, src0=17, src1=18, n=19, aux=20, addr=0x4000),
+        Instr(Op.GEMV, F_ACC | F_W8, dst=21, src0=22, src1=23, n=24, aux=25, addr=0x5000),
+        Instr(Op.KVW, flags=0x6, dst=26, src0=27, src1=28, n=29, aux=30, addr=0x6000),
+        Instr(Op.ATTN, flags=0x7, dst=31, src0=32, src1=33, n=34, aux=35, addr=0x7000),
+        Instr(Op.SILU, flags=0x8, dst=36, src0=37, src1=38, n=39, aux=40, addr=0x8000),
+        Instr(Op.ADD, flags=0x9, dst=41, src0=42, src1=43, n=44, aux=45, addr=0x9000),
+        Instr(Op.END, flags=0x15),
+    ]
+    add_run("all_ops_stall", all_ops, {}, done=1, fault=0, stall=1)
+    add_run("limit_end", [Instr(Op.NOP) for _ in range(511)] + [Instr(Op.END)], {}, done=1, fault=0)
+    add_run("limit_nop", [Instr(Op.NOP) for _ in range(512)], {}, done=0, fault=1)
+
+    pre_emb = Instr(Op.EMB, F_W8, dst=0x111, src0=0x222, src1=0x333, n=0x444, aux=0x55, addr=0x66666666)
+    pre_items = [
+        Instr(Op.CFG, aux=int(Reg.PAGE), addr=0xAABBCCDD),
+        Instr(Op.CFG, aux=int(Reg.EPS), addr=0x7F800000),
+        pre_emb,
+    ]
+    post_emb = Instr(Op.EMB, flags=0, dst=1, src0=2, src1=3, n=4, aux=5, addr=0x6)
+    post_items = [Instr(Op.NOP), post_emb, Instr(Op.END)]
+    pre_cfg = cfg_words({int(Reg.PAGE): 0xAABBCCDD, int(Reg.EPS): 0x7F800000})
+    post_cfg = cfg_words({})
+    scenarios.append({
+        "kind": 1, "name": "reset_mid",
+        "pre_words": [pack(item) for item in pre_items], "pre_cfg": pre_cfg,
+        "pre_issue": issue_of(pre_emb),
+        "post_words": [pack(item) for item in post_items],
+        "post_done": 1, "post_fault": 0, "post_pc": len(post_items) - 1,
+        "post_cfg": post_cfg, "post_issues": [issue_of(post_emb)],
+    })
+    expected.append({
+        "name": "reset_mid_pre", "done": 0, "fault": 0, "pc": len(pre_items) - 1,
+        "busy": 1, "cfg": pre_cfg, "issues": [issue_of(pre_emb)],
+    })
+    expected.append({
+        "name": "reset_mid_post", "done": 1, "fault": 0, "pc": len(post_items) - 1,
+        "busy": 0, "cfg": post_cfg, "issues": [issue_of(post_emb)],
+    })
+
+    if (F_ACC | F_W8) != gemv.flags:
+        raise AssertionError("GEMV flags must include F_ACC|F_W8")
+    if any(op in {Op.NOP, Op.CFG, Op.END} for block in expected for op in
+           (issue[0] for issue in block["issues"])):
+        raise AssertionError("NOP/CFG/END leaked into an expected issue list")
+
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"DCU1\n{len(scenarios)}\n")
+        for sc in scenarios:
+            if sc["kind"] == 0:
+                out.write(f"0 {sc['reset']} {sc['stall']} {sc['name']}\n")
+                out.write(f"{len(sc['words'])}\n")
+                for word in sc["words"]:
+                    out.write(word + "\n")
+                out.write(f"{sc['done']} {sc['fault']} {sc['pc']}\n")
+                out.write(" ".join(f"{word:08x}" for word in sc["cfg"]) + "\n")
+                out.write(f"{len(sc['issues'])}\n")
+                for issue in sc["issues"]:
+                    out.write(" ".join(f"{field:x}" for field in issue) + "\n")
+            else:
+                out.write(f"1 {sc['name']}\n")
+                out.write(f"{len(sc['pre_words'])}\n")
+                for word in sc["pre_words"]:
+                    out.write(word + "\n")
+                out.write(" ".join(f"{word:08x}" for word in sc["pre_cfg"]) + "\n")
+                out.write(" ".join(f"{field:x}" for field in sc["pre_issue"]) + "\n")
+                out.write(f"{len(sc['post_words'])}\n")
+                for word in sc["post_words"]:
+                    out.write(word + "\n")
+                out.write(f"{sc['post_done']} {sc['post_fault']} {sc['post_pc']}\n")
+                out.write(" ".join(f"{word:08x}" for word in sc["post_cfg"]) + "\n")
+                out.write(f"{len(sc['post_issues'])}\n")
+                for issue in sc["post_issues"]:
+                    out.write(" ".join(f"{field:x}" for field in issue) + "\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+    observed = _parse_dcu_trace(results.read_text(encoding="ascii"))
+    if len(observed) != len(expected):
+        raise AssertionError(f"dcu_issue traces {len(observed)} != {len(expected)}")
+    for got, exp in zip(observed, expected):
+        if got != exp:
+            raise AssertionError(f"dcu_issue trace mismatch\n got {got}\n exp {exp}")
+    print(report, flush=True)
+    return {"module": "dcu_issue", "programs": len(scenarios), "report": report}
+
+
+def _parse_dcu_trace(text):
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    blocks = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("BEGIN "):
+            raise AssertionError(f"dcu trace desync: {lines[index]}")
+        name = lines[index].split()[1]
+        done, fault, pc, busy = (int(part) for part in lines[index + 1].split())
+        cfg = [int(part, 16) for part in lines[index + 2].split()]
+        nissue = int(lines[index + 3])
+        issues = []
+        for offset in range(nissue):
+            issues.append(tuple(int(part, 16) for part in lines[index + 4 + offset].split()))
+        if lines[index + 4 + nissue] != "END":
+            raise AssertionError("dcu trace missing END")
+        if len(cfg) != 16:
+            raise AssertionError("dcu trace cfg width")
+        blocks.append({
+            "name": name, "done": done, "fault": fault, "pc": pc, "busy": busy,
+            "cfg": cfg, "issues": issues,
+        })
+        index += 5 + nissue
+    return blocks
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -985,6 +1215,8 @@ def write_rtl_report(summary):
             config = f"n={test['n']}, libm_ulp<={test['libm_ulp_cap']} (obs {test['observed_libm_ulp']})"
         elif module == "axi_page_bridge":
             config = f"DATA_W={test['data_w']}, jobs={test['jobs']}"
+        elif module == "dcu_issue":
+            config = f"programs={test['programs']}"
         elif "max_beats" in test:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
         else:
@@ -1008,6 +1240,8 @@ def write_rtl_report(summary):
         "",
         "axi_page_bridge is sim-only: `axi_read_master` loads pack_stream bytes into `gemv_row`, optional `axi_write_master` stores the FP32 result. No DDR PHY or multi-HP reorder.",
         "",
+        "dcu_issue 只译码/发射，不对拍 VPU.gemv，不执行算子。",
+        "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
         "Reproduce from step3: `python3 run_rtl_tests.py`.",
@@ -1019,11 +1253,11 @@ def write_rtl_report(summary):
         "rtl/w4a16_dot.sv", "rtl/page_demux.sv", "rtl/scale_accum.sv", "rtl/gemv_row.sv",
         "rtl/gemv_tile.sv", "rtl/fp32_pkg.sv", "rtl/fp32_rsqrt.sv", "rtl/fp32_exp.sv",
         "rtl/spu_rmsnorm.sv", "rtl/spu_silu_mul.sv", "rtl/axi_page_bridge.sv",
-        "rtl/axi_read_master.sv", "rtl/axi_write_master.sv",
+        "rtl/axi_read_master.sv", "rtl/axi_write_master.sv", "rtl/dcu_issue.sv",
         "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
         "rtl/tb/gemv_tile_main.cpp", "rtl/tb/spu_rmsnorm_main.cpp", "rtl/tb/spu_silu_main.cpp",
         "rtl/tb/fp32_unary_main.cpp", "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp",
-        "rtl/tb/axi_page_main.cpp", "rtl/tb/sim_common.h",
+        "rtl/tb/axi_page_main.cpp", "rtl/tb/dcu_issue_main.cpp", "rtl/tb/sim_common.h",
         "run_rtl_tests.py", "rtl_spu_golden.py", "kv260/axi_plan.py",
     ):
         digest = hashlib.sha256((BASE / rel).read_bytes()).hexdigest()
@@ -1061,6 +1295,7 @@ def main():
     reports.append(test_axi_page(args.seed, toolchain))
     axi_cfgs = [(128, 256)] if args.quick else [(128, 256), (128, 16), (64, 256), (32, 16)]
     reports += [test_axi(width, beats, args.seed, toolchain) for width, beats in axi_cfgs]
+    reports.append(test_dcu_issue(args.seed, toolchain))
     axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
     reports += [test_axi_write(width, beats, args.seed, toolchain) for width, beats in axi_wr_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,

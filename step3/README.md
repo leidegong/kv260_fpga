@@ -2,7 +2,7 @@
 
 目标：VPU / SPU / MMU + DDR 权重分页，batch=1、1024上下文持续解码8–10 tokens/s。
 
-**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。完整 SPU/DCU 调度、多口重排、KV硬件调度、PS/PL集成和驱动仍需实现；AXI 读写主机与仿真用页桥、SPU 数值叶和多行 GEMV 已在 Verilator 下对拍。没有bitstream、完整真实checkpoint质量结果或板测速度。
+**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。完整 SPU 调度、DCU 执行、多口重排、KV硬件调度、PS/PL集成和驱动仍需实现；AXI 读写主机与仿真用页桥、SPU 数值叶、多行 GEMV 和 `dcu_issue`（只译码/发射，不执行算子）已在 Verilator 下对拍。没有bitstream、完整真实checkpoint质量结果或板测速度。
 
 实施规格见 [KV260 v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md)。P3 v0.1及旧P3性能报告保留作历史分析，不能用作KV260部署配置。新平台预算见 [KV260报告](out/kv260_report.md)。
 
@@ -68,6 +68,7 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 | `rtl/gemv_tile.sv` | R 交错多行：共享 demux + ROWS 累加，对拍 `VPU.gemv` | 层调度、DCU、DDR |
 | `rtl/fp32_pkg.sv` + `fp32_rsqrt`/`fp32_exp`/`spu_rmsnorm`/`spu_silu_mul` | SPU 数值叶；对 `rtl_spu_golden` 逐位；对 libm 有 ULP 门限 | 完整 SPU 调度、softmax 顶层 |
 | `rtl/axi_page_bridge.sv` | 仿真：AXI 读 → `gemv_row`，可选 AXI 写回结果 | DDR PHY、多 HP、驱动 |
+| `rtl/dcu_issue.sv` | 128-bit ISA 译码、CFG（aux 0..12）、直到 END 的发射；对拍 `isa.py` | 不执行算子，无层执行、无 KV 地址硬件、无 DDR、无时序/带宽/tok/s |
 
 A16表示有符号整数尾数，**不是IEEE FP16**。`scale_accum`的有限结果与`VPU.gemv`的FP32公式逐位一致（0 ULP）；NaN规范为`0x7fc00000`，不要求与主机libm的NaN位型相同。默认32路dot只用于功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。AXI读主机不是HP口驱动，也没有寄存器地址。
 
@@ -78,7 +79,7 @@ python3 run_rtl_tests.py
 
 使用实际Verilator仿真RTL，再与NumPy、现有页打包器和`split_read`比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。Verilator可以装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
 
-完整测试覆盖LANES 1/8/32/128、页宽组合、`scale_accum`、`gemv_row`、`gemv_tile`、SPU 叶、`axi_page_bridge`，以及AXI读/写多种宽度。含随机停顿、结果反压、复位、极值与尾页。`--quick` 含默认dot/page、scale、单行GEMV、SPU叶、`gemv_tile`(R=2)、`axi_page_bridge`和一种AXI读+写。SPU 对 libm 非逐位一致，见 `rtl/README.md`；完整 SPU/softmax 调度仍无。
+完整测试覆盖LANES 1/8/32/128、页宽组合、`scale_accum`、`gemv_row`、`gemv_tile`、SPU 叶、`axi_page_bridge`、`dcu_issue`，以及AXI读/写多种宽度。含随机停顿、结果反压、复位、极值与尾页。`--quick` 含默认dot/page、scale、单行GEMV、SPU叶、`gemv_tile`(R=2)、`axi_page_bridge`、`dcu_issue`和一种AXI读+写。SPU 对 libm 非逐位一致，见 `rtl/README.md`；完整 SPU/softmax 调度仍无。`dcu_issue` 只译码和发射，不对拍 `VPU.gemv`，不执行算子。
 
 安装Vivado的K26器件支持后可运行：
 
@@ -110,6 +111,6 @@ python3 board_probe.py --out board_probe.json
 | `export_kv260.py` / `run_bundle.py` | 可校验软件部署包、无副作用镜像执行及精度对照 |
 | `platforms.py` / `kv260_report.py` | KV260端口、计算及存储预算；预测非板测 |
 | `kv260/axi_plan.py` / `board_probe.py` | AXI契约、只读板卡信息 |
-| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、单行GEMV、AXI读写拆分，以及真实RTL仿真 |
+| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、单行/多行 GEMV、SPU 叶、AXI 读写、`dcu_issue` 译码/发射，以及真实 RTL 仿真 |
 
 软件回归、unittest和RTL的当次结果见 [验证记录](out/validation_report.md)。实际部署的剩余工作见 [路线图](../docs/ROADMAP.md)。
