@@ -4,7 +4,7 @@
 |---|---|
 | Core software selftest | Not re-run this pass. 2026-09-26: 24 passed, 1 optional Torch/CUDA check skipped, 0 failed (~10 s) |
 | Bundle + AXI plan + KV260 budget unittest | Not re-run this pass. 2026-09-26: 18 passed (~0.7 s) |
-| Real RTL simulation | 28 parameter configurations passed (294.91 s, seed 12345), including `kv_row_off` |
+| Real RTL simulation | 29 parameter configurations passed (303.94 s, seed 12345), including `kv_abs_addr` |
 | KV260 budget script | Not re-run in this pass; prior `out/kv260_report.md` unchanged |
 | Real Qwen3-1.7B weight accuracy | NOT RUN; no real checkpoint downloaded |
 | Vivado synthesis / implementation | NOT RUN; no usable Vivado found |
@@ -17,13 +17,13 @@ Commands executed from `step3` on this host (Linux, CPython 3.13, NumPy 2.2.4, V
 python3 run_rtl_tests.py
 ```
 
-Grok's earlier `--quick` (15 configs, 168.29 s) also passed; the numbers above are the full matrix re-run. Software selftest and unittest were not repeated.
+Grok's earlier `--quick` (16 configs, 178.99 s) also passed; the numbers above are the full matrix re-run. Software selftest and unittest were not repeated.
 
-RTL modules covered this pass (counts): axi_page_bridge×1, axi_read_master×4, axi_write_master×3, dcu_issue×1, fp32_exp×1, fp32_rsqrt×1, gemv_row×3, gemv_tile×2, kv_addr_unit×1, kv_row_off×1, page_demux×3, scale_accum×1, spu_rmsnorm×1, spu_silu_mul×1, w4a16_dot×4.
+RTL modules covered this pass (counts): axi_page_bridge×1, axi_read_master×4, axi_write_master×3, dcu_issue×1, fp32_exp×1, fp32_rsqrt×1, gemv_row×3, gemv_tile×2, kv_abs_addr×1, kv_addr_unit×1, kv_row_off×1, page_demux×3, scale_accum×1, spu_rmsnorm×1, spu_silu_mul×1, w4a16_dot×4.
 
 Additions vs prior main:
 
-- `kv_row_off`: in-region byte offset of `MMU._kv` `data[pos]` / `scale[pos]` and `data[pos].nbytes`. Does not add the region base. Not a DDR PHY, not multi-HP, and not a tok/s result. `kv_addr_unit` and `dcu_issue` are unchanged.
+- `kv_abs_addr`: absolute byte address = `kv_addr_unit` region base + `kv_row_off` in-region offset (data row for K/V, scale element for KS/VS). Leaf faults and a sum that does not fit 49 bits yield fault and address 0. Not a DDR PHY, not multi-HP, not an AXI master, and not a tok/s result. `kv_addr_unit` and `kv_row_off` formulas are unchanged.
 - Docs: root README, `docs/ROADMAP.md`, `step3/README.md`, `rtl/README.md`. CI workflow draft stays untracked (token lacks `workflow` scope).
 
 Software throughput estimates are not board measurements. No bitstream, utilization, timing, or tok/s hardware claim.

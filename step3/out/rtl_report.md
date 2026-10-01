@@ -2,7 +2,7 @@
 
 Status: PASS. Actual Verilator RTL simulation; no Vivado synthesis, implementation or board test.
 
-Seed: 12345; duration: 294.91 s.
+Seed: 12345; duration: 303.94 s.
 
 | Module | Configuration | Result |
 |---|---|---|
@@ -31,6 +31,7 @@ Seed: 12345; duration: 294.91 s.
 | dcu_issue | programs=15 | PASS dcu_issue programs=15 bubbles=563 stalls=27 reset_mid=1 limit=512 |
 | kv_addr_unit | ADDR_W=49, n=103 | PASS kv_addr_unit addr_w=49 n=103 cycles=1043 bubbles=264 stalled=569 resets=1 |
 | kv_row_off | OFF_W=49, n=53 | PASS kv_row_off off_w=49 n=53 cycles=537 bubbles=135 stalled=292 resets=1 |
+| kv_abs_addr | ADDR_W=49, n=73 | PASS kv_abs_addr addr_w=49 n=73 cycles=821 bubbles=189 stalled=401 resets=2 |
 | axi_write_master | DATA_W=128, MAX_BEATS=256, cases=8 | PASS axi_write data_w=128 cases=8 cycles=3206 aw_stalls=16 w_stalls=2054 resets=8 |
 | axi_write_master | DATA_W=64, MAX_BEATS=256, cases=8 | PASS axi_write data_w=64 cases=8 cycles=5590 aw_stalls=22 w_stalls=3590 resets=8 |
 | axi_write_master | DATA_W=32, MAX_BEATS=16, cases=9 | PASS axi_write data_w=32 cases=9 cycles=17829 aw_stalls=650 w_stalls=10278 resets=9 |
@@ -57,6 +58,8 @@ kv_addr_unit 只对拍 isa.kv_addr 的字节区基址，不是 KV 行地址，�
 
 kv_row_off 只对拍区内 token 行偏移（MMU._kv 的 reshape(ctx, head_dim) 与 scale[pos] 的字节偏移，以及 data[pos].nbytes），不加区基址，没有 DDR / 多 HP / tok/s。
 
+kv_abs_addr 只是区基址加区内偏移：kv_addr_unit 的 isa.kv_addr 加上 kv_row_off 的 data[pos]（K/V）或 scale[pos]（KS/VS）。不把 layer_base 再加一次，也不把 data 行偏移加到 KS/VS 上。没有 DDR PHY / 多 HP / tok/s，不是 AXI 主机，不把地址送到 axi_read_master。
+
 Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.
 
 Reproduce from step3: `python3 run_rtl_tests.py`.
@@ -79,6 +82,7 @@ Reproduce from step3: `python3 run_rtl_tests.py`.
 - `rtl/dcu_issue.sv`: `9919b6eaa64590c4595e18b2ef0adb56024e76e3e6500608f049b3498a57fbff`
 - `rtl/kv_addr_unit.sv`: `46cc5697af1d8590a591f6f0e89505efdcdb19c9c6eff52a6ef169d33ff630ae`
 - `rtl/kv_row_off.sv`: `619e8674017a020b213623747ed9dcf5dda95356b24220fb8cc9b2da28c2b702`
+- `rtl/kv_abs_addr.sv`: `139d116348ebaf556085f067b6e7fcc2419d090bea23d8d4d2eb1b1715cf3a35`
 - `rtl/tb/dot_main.cpp`: `b95e8f71a280259cbbbcd69647a0712d80aae26ab5a1555d5a5973dda5e3a741`
 - `rtl/tb/page_main.cpp`: `f242c4debacf2965aa8ef15bf479db35248528968bc2574ebb6c1f9b24da97a4`
 - `rtl/tb/scale_main.cpp`: `1c9ab21234bb724643841c29d3fb84bf3695d5f28918ca5e38d136e752426321`
@@ -93,7 +97,8 @@ Reproduce from step3: `python3 run_rtl_tests.py`.
 - `rtl/tb/dcu_issue_main.cpp`: `f02f0745a7785ba76da2b30fd8d9d3c46e7886a26aa1e23792a456b3f472383b`
 - `rtl/tb/kv_addr_main.cpp`: `044f3e282eb00240fe1c6634c97860507b51340356bb38a34f2101cac58896e6`
 - `rtl/tb/kv_row_main.cpp`: `94ec7aed89a8ec1014c3b8dc950d3095b43b644a635f48f0e507ae6c7f89bddf`
+- `rtl/tb/kv_abs_main.cpp`: `ae148614460eb4ccc2e22fb2a2192a5d1575d043a5f253bd9a36e6c3b1304bbb`
 - `rtl/tb/sim_common.h`: `2886d974f5fc65e8b4ebd0ff69a10547c6c56bff7934beed0d5f5e115055b14c`
-- `run_rtl_tests.py`: `f4055639b4d41e1e26d5f8b8b62d810f4e9c1162847b235ed23ab9dcd26bb1f4`
+- `run_rtl_tests.py`: `be3db596aac186afeca47066e8c1b5b844f922fac0cd1b576c62d7a91403bfdd`
 - `rtl_spu_golden.py`: `afbd84d385d50a240f2d754c53fa79f9e57cb0f650a18ea0af12bb007e2cd7fc`
 - `kv260/axi_plan.py`: `1f448440c6a45b8b525ec0640dd5fac83e0bf340f6edb3f550783c9c291a0bb6`

@@ -1,4 +1,4 @@
-"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read, split_write, isa.kv_addr and the MMU._kv row view.
+"""Build actual Verilated RTL and check it against NumPy, the DDR packer, split_read, split_write, isa.kv_addr, the MMU._kv row view, and their sum.
 
 Run: python run_rtl_tests.py [--quick] [--seed 12345]
 Local tool install: python -m pip install --target rtl/.tools -r requirements-rtl.txt
@@ -1692,6 +1692,488 @@ def test_kv_row(seed, toolchain):
     return {"module": "kv_row_off", "off_w": off_w, "n": len(vecs), "report": report}
 
 
+def test_kv_abs(seed, toolchain):
+    """Absolute byte address = isa.kv_addr region base + one MMU._kv in-region offset.
+
+    ADDR_W=49 only. A successful expected address is int(kv_addr(...)) plus the
+    NumPy byte offset of data[pos] (kind K/V) or scale[pos] (kind KS/VS). This
+    test does not reimplement the region-base formula. A leaf fault or a sum
+    that does not fit in ADDR_W is fault/0, not a truncated residue. plan_image
+    region offsets are checked equal to kv_addr, then the RTL address is that
+    offset plus the measured in-region byte offset.
+    """
+    from ddr_pager import QuantCfg, plan_image
+    from isa import kv_addr, kv_layout
+    from model_cfg import TINY
+    try:
+        from numpy.lib.array_utils import byte_bounds
+    except ImportError:  # NumPy 1.x
+        from numpy import byte_bounds
+
+    addr_w = 49
+    limit = 1 << addr_w
+    max_measure = 16 * 1024 * 1024
+    kind_name = ("K", "KS", "V", "VS")
+    if kind_name != ("K", "KS", "V", "VS"):
+        raise AssertionError("kind codes must be 0=K, 1=KS, 2=V, 3=VS")
+    try:
+        kv_addr(None, 0, 0, "Q", 1, 1)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("isa.kv_addr accepted a fifth kind")
+
+    def is_scale(kind):
+        return kind_name[kind] in ("KS", "VS")
+
+    def contiguous_bytes(pos, head_dim, kv_bits):
+        """Fit check only. Not the number stored as a golden address."""
+        item = int(np.dtype(np.int8 if kv_bits == 8 else np.int16).itemsize)
+        return pos * head_dim * item, pos * int(np.dtype(np.float16).itemsize), head_dim * item
+
+    def measure_views(raw, scale_raw, ctx, head_dim, kv_bits, pos):
+        dt = np.int8 if kv_bits == 8 else np.int16
+        item = int(np.dtype(dt).itemsize)
+        if item != kv_bits // 8:
+            raise AssertionError("dtype itemsize is not kv_bits/8")
+        if int(raw.size) != ctx * head_dim * item:
+            raise AssertionError("data region length is not ctx*head_dim*itemsize")
+        if int(scale_raw.size) != ctx * 2:
+            raise AssertionError("scale region length is not ctx*2")
+        data = raw.view(dt).reshape(ctx, head_dim)
+        scale = scale_raw.view(np.float16)
+        if data.shape != (ctx, head_dim) or data.dtype != dt or not data.flags["C_CONTIGUOUS"]:
+            raise AssertionError("data view is not the C reshape(ctx, head_dim)")
+        if scale.shape != (ctx,) or scale.dtype != np.float16 or not scale.flags["C_CONTIGUOUS"]:
+            raise AssertionError("scale view is not float16[ctx]")
+        if int(data.ctypes.data) != int(raw.ctypes.data):
+            raise AssertionError("data view does not start at the uint8 region")
+        if int(scale.ctypes.data) != int(scale_raw.ctypes.data):
+            raise AssertionError("scale view does not start at the scale region")
+        row = data[pos]
+        scale_item = scale[pos:pos + 1]
+        if not np.shares_memory(row, raw) or not np.shares_memory(scale_item, scale_raw):
+            raise AssertionError("row/scale item is not a view")
+        data_off = int(row.ctypes.data - raw.ctypes.data)
+        scale_off = int(scale_item.ctypes.data - scale_raw.ctypes.data)
+        data_bb = int(byte_bounds(row)[0] - byte_bounds(raw)[0])
+        scale_bb = int(byte_bounds(scale_item)[0] - byte_bounds(scale_raw)[0])
+        if data_off != data_bb or scale_off != scale_bb:
+            raise AssertionError("ctypes pointer difference and byte_bounds disagree")
+        if int(scale_item.nbytes) != int(np.dtype(np.float16).itemsize):
+            raise AssertionError("scale[pos] is not one float16")
+        expect = contiguous_bytes(pos, head_dim, kv_bits)
+        got = (data_off, scale_off, int(row.nbytes))
+        if got != expect:
+            raise AssertionError(f"measured {got} != C-contiguous {expect}")
+        return data_off, scale_off, int(row.nbytes)
+
+    def measure_alloc(ctx, head_dim, kv_bits, pos):
+        item = kv_bits // 8
+        nbytes = ctx * head_dim * item
+        scale_n = ctx * 2
+        if nbytes > max_measure or scale_n > max_measure:
+            raise AssertionError("legal vector is too large to measure with a real NumPy view")
+        raw = np.zeros(nbytes, np.uint8)
+        scale_raw = np.zeros(scale_n, np.uint8)
+        return measure_views(raw, scale_raw, ctx, head_dim, kv_bits, pos)
+
+    def row_inputs_ok(pos, ctx, head_dim, kv_bits):
+        return (kv_bits in (8, 16) and ctx > 0 and head_dim > 0 and 0 <= pos < ctx
+                and all(0 <= int(v) <= 0xFFFFFFFF for v in (pos, ctx, head_dim)))
+
+    vecs = []
+
+    def add(base, head, kind, data, scale, pos, ctx, head_dim, kv_bits, flags=1,
+            layout=False, region_off=None, img=None):
+        base, head, kind = int(base), int(head), int(kind)
+        data, scale, flags = int(data), int(scale), int(flags)
+        pos, ctx, head_dim, kv_bits = (int(v) for v in (pos, ctx, head_dim, kv_bits))
+        if not 0 <= kind < len(kind_name):
+            raise AssertionError(f"kind code {kind}")
+        if not 0 <= head <= 0xFFFF or not 0 <= base < limit:
+            raise AssertionError("head or base is outside the port width")
+        if not 0 <= data <= 0xFFFFFFFF or not 0 <= scale <= 0xFFFFFFFF:
+            raise AssertionError("data/scale do not fit in a CFG word")
+        if not all(0 <= v <= 0xFFFFFFFF for v in (pos, ctx, head_dim)) or not 0 <= kv_bits <= 0xFF:
+            raise AssertionError("row input does not fit the port")
+        region = int(kv_addr(img, base, head, kind_name[kind], data, scale))
+        if region < 0:
+            raise AssertionError("kv_addr returned a negative address")
+        base_fault = region >= limit
+        data_off = scale_off = off = None
+        row_fault = not row_inputs_ok(pos, ctx, head_dim, kv_bits)
+        if not row_fault:
+            wide = contiguous_bytes(pos, head_dim, kv_bits)
+            # Too wide to allocate. The vector stores a fault, not this product.
+            if wide[0] >= limit or wide[1] >= limit or wide[2] >= (1 << 32):
+                row_fault = True
+            else:
+                data_off, scale_off, _row_bytes = measure_alloc(ctx, head_dim, kv_bits, pos)
+                if (data_off, scale_off) != (wide[0], wide[1]):
+                    raise AssertionError("measurement disagreed with the fit check")
+                off = scale_off if is_scale(kind) else data_off
+        if base_fault or row_fault:
+            exp_addr, fault = 0, 1
+            total = None
+        else:
+            # The only successful golden: kv_addr's integer plus the measured offset.
+            total = region + off
+            if total >= limit:
+                exp_addr, fault = 0, 1
+            else:
+                exp_addr, fault = total, 0
+        item = {
+            "base": base, "head": head, "kind": kind, "data": data, "scale": scale,
+            "pos": pos, "ctx": ctx, "head_dim": head_dim, "kv_bits": kv_bits,
+            "flags": flags, "region": region, "off": off, "data_off": data_off,
+            "scale_off": scale_off, "total": total, "exp_addr": exp_addr, "exp_fault": fault,
+            "base_fault": base_fault, "row_fault": row_fault, "layout": bool(layout),
+        }
+        if layout:
+            item["region_off"] = int(region_off)
+            if region != item["region_off"] or base_fault or row_fault or fault:
+                raise AssertionError(
+                    f"layout {kind_name[kind]} region {item['region_off']} != kv_addr {region}")
+            if exp_addr != item["region_off"] + off:
+                raise AssertionError("layout absolute address is not region offset + measured offset")
+            if exp_addr == item["region_off"]:
+                raise AssertionError("layout sample equals the region base; pos offset was zero")
+        vecs.append(item)
+        return item
+
+    # 524288 / 8192 are plan KV_DATA / KV_SCALE byte counts, not a board measurement.
+    plan_data, plan_scale = 524288, 8192
+    # First two differ so the harness can check a same-cycle replacement.
+    add(0x3F, 0, 0, plan_data, plan_scale, 0, 4, 4, 8)
+    add(0x1000, 2, 1, plan_data, plan_scale, 3, 4, 4, 16)
+    if vecs[0]["exp_fault"] or vecs[0]["exp_addr"] != 0x3F or vecs[0]["off"] != 0:
+        raise AssertionError("h=0 kind=K pos=0 absolute address is not layer_base")
+    if vecs[1]["exp_fault"] or vecs[1]["data_off"] == vecs[1]["scale_off"]:
+        raise AssertionError("overlap pair does not select a scale offset distinct from data")
+    if vecs[1]["exp_addr"] == vecs[1]["region"] or vecs[1]["exp_addr"] == vecs[1]["base"]:
+        raise AssertionError("KS absolute address collapsed to the region base or layer_base")
+
+    for kv_bits in (8, 16):
+        for kind in range(4):
+            add(0x2000, 1, kind, plan_data, plan_scale, 0, 4, 4, kv_bits)
+            add(0x2000, 1, kind, plan_data, plan_scale, 3, 4, 4, kv_bits)
+            if vecs[-1]["data_off"] == vecs[-1]["scale_off"]:
+                raise AssertionError("pos=ctx-1 data and scale offsets are not distinct")
+            want = vecs[-1]["scale_off"] if is_scale(kind) else vecs[-1]["data_off"]
+            if vecs[-1]["off"] != want or vecs[-1]["exp_fault"]:
+                raise AssertionError("kind did not select the NumPy offset for that region")
+            if vecs[-1]["exp_addr"] != vecs[-1]["region"] + want:
+                raise AssertionError("success address was not kv_addr + measured offset")
+            other = vecs[-1]["data_off"] if is_scale(kind) else vecs[-1]["scale_off"]
+            if vecs[-1]["exp_addr"] == vecs[-1]["region"] + other:
+                raise AssertionError("absolute address also matches the other region's offset")
+
+    # Zero scale offset, but the KS region base is not the layer base.
+    ks0 = add(0x1000, 0, 1, 100, 7, 0, 4, 4, 8)
+    if ks0["off"] != 0 or ks0["exp_fault"] or ks0["region"] == ks0["base"]:
+        raise AssertionError("KS pos=0 did not land on a region base different from layer_base")
+    if ks0["exp_addr"] != ks0["region"]:
+        raise AssertionError("zero scale offset did not keep the KS region base")
+
+    # h=0 kind=K: region base is layer_base. Build the near-top sums from that
+    # return value plus a measured offset, without a second copy of the formula.
+    def k0_region(base, data, scale):
+        got = int(kv_addr(None, base, 0, "K", data, scale))
+        if got != int(base):
+            raise AssertionError("h=0 kind=K did not return layer_base")
+        return got
+
+    probe = measure_alloc(8, 4, 8, 7)
+    k_off = probe[0]
+    if k_off == 0 or k_off >= limit:
+        raise AssertionError("probe data offset is not a small nonzero measurement")
+    under_base = (limit - 1) - k_off
+    exact_base = limit - k_off
+    residue_base = (limit - k_off) + 17
+    for base in (under_base, exact_base, residue_base):
+        if not 0 <= base < limit:
+            raise AssertionError("constructed layer_base does not fit ADDR_W")
+        k0_region(base, 0, 0)
+    under = add(under_base, 0, 0, 0, 0, 7, 8, 4, 8)
+    exact = add(exact_base, 0, 0, 0, 0, 7, 8, 4, 8)
+    residue = add(residue_base, 0, 0, 0, 0, 7, 8, 4, 8)
+    if under["region"] + under["off"] != limit - 1 or under["exp_fault"] or under["exp_addr"] != limit - 1:
+        raise AssertionError("sum just under 2^ADDR_W was not kept")
+    if exact["region"] >= limit or exact["off"] >= limit or exact["region"] + exact["off"] != limit:
+        raise AssertionError("exact 2^ADDR_W sum was not built from two in-range pieces")
+    if exact["exp_fault"] != 1 or exact["exp_addr"] != 0:
+        raise AssertionError("exact 2^ADDR_W sum was not a faulting zero")
+    if (residue["region"] >= limit or residue["off"] >= limit
+            or residue["region"] + residue["off"] < limit
+            or ((residue["region"] + residue["off"]) % limit) == 0):
+        raise AssertionError("sum residue does not stick out of ADDR_W")
+    if residue["exp_fault"] != 1 or residue["exp_addr"] != 0:
+        raise AssertionError("sum residue was not a faulting zero")
+
+    # Same shape on KS, with a region base that is not layer_base.
+    s_off = probe[1]
+    if s_off == 0 or s_off == k_off:
+        raise AssertionError("probe scale offset does not differ from the data offset")
+    ks_found = None
+    for data_cfg in (1, 64, 4096):
+        for bias in (0, 1, 5, 17):
+            base = limit - s_off - bias
+            if not 0 <= base < limit:
+                continue
+            region = int(kv_addr(None, base, 0, "KS", data_cfg, 0))
+            if region >= limit or region == base:
+                continue
+            total = region + s_off
+            if total >= limit and (total % limit) != 0:
+                ks_found = (base, data_cfg, region, total)
+                break
+        if ks_found:
+            break
+    if ks_found is None:
+        raise AssertionError("kv_addr + measured scale offset produced no in-range sum overflow")
+    ks_over = add(ks_found[0], 0, 1, ks_found[1], 0, 7, 8, 4, 8)
+    if (ks_over["base_fault"] or ks_over["row_fault"] or ks_over["region"] == ks_over["base"]
+            or ks_over["exp_fault"] != 1 or ks_over["exp_addr"] != 0
+            or ks_over["off"] != s_off):
+        raise AssertionError("KS sum overflow did not fault from a non-layer region base")
+
+    # Region base itself does not fit. The row offset is a real nonzero measurement.
+    # 0 (faulting base) + offset must not come back as a successful address.
+    huge = int(kv_addr(None, 0, 65535, "VS", 0xFFFFFFFF, 0xFFFFFFFF))
+    if huge < limit or (huge % limit) == 0:
+        raise AssertionError("kv_addr overflow is not a nonzero residue")
+    base_over = add(0, 65535, 3, 0xFFFFFFFF, 0xFFFFFFFF, 1, 4, 4, 8)
+    if (not base_over["base_fault"] or base_over["row_fault"] or base_over["off"] in (None, 0)
+            or base_over["exp_fault"] != 1 or base_over["exp_addr"] != 0):
+        raise AssertionError("region-base overflow was not a fault distinct from the row offset")
+    if base_over["exp_addr"] == base_over["off"]:
+        raise AssertionError("fault address collided with the row offset")
+
+    # Both leaves fault. Their outputs are 0+0, which must still be a fault.
+    both = add(0, 65535, 3, 0xFFFFFFFF, 0xFFFFFFFF, 0, 4, 4, 4)
+    if not both["base_fault"] or not both["row_fault"] or both["exp_fault"] != 1 or both["exp_addr"] != 0:
+        raise AssertionError("double fault was not stored as fault/0")
+
+    # In-region offset does not fit. Region base is a small nonzero kv_addr result.
+    # Adding that base to a faulting 0 must not succeed.
+    row_base = int(kv_addr(None, 0xABC, 0, "K", 0, 0))
+    if row_base != 0xABC:
+        raise AssertionError("row-overflow base is not the h=0 K layer base")
+    wide_pos, wide_hd = 1 << 29, 1 << 20
+    wide_exact = contiguous_bytes(wide_pos, wide_hd, 8)
+    if wide_exact[0] != limit or wide_exact[0] < max_measure:
+        raise AssertionError("kv_bits=8 product is not an unmeasurable 2^ADDR_W")
+    row_exact = add(0xABC, 0, 0, 0, 0, wide_pos, wide_pos + 1, wide_hd, 8)
+    if (row_exact["base_fault"] or not row_exact["row_fault"] or row_exact["region"] != 0xABC
+            or row_exact["exp_fault"] != 1 or row_exact["exp_addr"] != 0):
+        raise AssertionError("row-offset overflow was not a faulting zero")
+
+    res_pos = (1 << 29) + 17
+    wide_res = contiguous_bytes(res_pos, wide_hd, 8)
+    if wide_res[0] < limit or (wide_res[0] % (1 << 32)) == 0 or (wide_res[0] & (limit - 1)) == 0:
+        raise AssertionError("row residue does not stick out of ADDR_W and 32 bits")
+    # Reset drops this pending fault. The next beat is a measured success.
+    add(0xABC, 0, 0, 0, 0, res_pos, res_pos + 1, wide_hd, 8, flags=1 | 2)
+    post = add(0x2B, 0, 0, 7, 9, 0, 4, 4, 16)
+    if post["exp_fault"] or post["exp_addr"] == 0 or post["exp_addr"] != post["region"]:
+        raise AssertionError("post-reset beat is not a nonzero measured address")
+
+    # data[pos].nbytes == 2^32 faults in the row leaf even though both offsets are 0.
+    if contiguous_bytes(0, 1 << 31, 16) != (0, 0, 1 << 32):
+        raise AssertionError("wide row count was not exactly 2^32 at pos 0")
+    row_wide = add(0x51, 0, 2, 3, 5, 0, 1, 1 << 31, 16)
+    if (row_wide["base_fault"] or not row_wide["row_fault"] or row_wide["region"] == 0
+            or row_wide["exp_fault"] != 1 or row_wide["exp_addr"] != 0):
+        raise AssertionError("wide row count did not propagate as a fault")
+
+    # Illegal rows. Nonzero region base so ignoring the row fault would return that base.
+    for args in (
+            (0x1000, 0, 0, 8, 1, 5, 5, 4, 8),      # pos >= ctx
+            (0x1000, 0, 2, 8, 1, 1, 4, 4, 4),      # kv_bits = 4
+            (0x1000, 0, 1, 8, 1, 0, 0, 4, 8),      # ctx = 0
+            (0x1000, 0, 3, 8, 1, 0, 8, 0, 16),     # head_dim = 0
+    ):
+        bad = add(*args)
+        if (bad["base_fault"] or not bad["row_fault"] or bad["region"] == 0
+                or bad["exp_fault"] != 1 or bad["exp_addr"] != 0):
+            raise AssertionError(f"illegal row did not fault with a nonzero region base: {args}")
+
+    rng = np.random.default_rng(seed)
+    for _ in range(16):
+        kind = int(rng.integers(0, 4))
+        kv_bits = 8 if int(rng.integers(0, 2)) == 0 else 16
+        head_dim = int(rng.integers(1, 9))
+        ctx = int(rng.integers(1, 9))
+        pos = int(rng.integers(0, ctx))
+        add(int(rng.integers(0, 1 << 20)), int(rng.integers(0, 8)), kind,
+            int(rng.integers(0, 1 << 16)), int(rng.integers(0, 1 << 12)),
+            pos, ctx, head_dim, kv_bits)
+
+    img = plan_image(TINY, QuantCfg())
+    lay_data, lay_scale = (int(v) for v in kv_layout(img))
+    ctx = int(img.q.ctx_max)
+    head_dim = int(img.cfg.head_dim)
+    kv_bits = int(img.q.kv_bits)
+    if kv_bits not in (8, 16) or head_dim % 2 != 0 or ctx < 2:
+        raise AssertionError("TINY plan is not an even-head 8/16 KV image")
+    pos = ctx - 1
+    n_layout = 0
+    for layer in range(img.cfg.layers):
+        layer_base = int(img.regions[f"L{layer}.K0"].offset)
+        if layer_base == 0:
+            raise AssertionError("L*.K0 offset is 0; the no-double-add check would be vacuous")
+        for head in range(img.cfg.n_kv):
+            for kind, name in enumerate(kind_name):
+                region = img.regions[f"L{layer}.{name}{head}"]
+                region_off = int(region.offset)
+                if region_off != int(kv_addr(img, layer_base, head, name, lay_data, lay_scale)):
+                    raise AssertionError(f"{region.name} offset != kv_addr")
+                item_n = 1 if kv_bits == 8 else 2
+                if name in ("K", "V"):
+                    if int(region.nbytes) != ctx * head_dim * item_n:
+                        raise AssertionError(f"{region.name} nbytes is not the data view length")
+                    raw = np.zeros(int(region.nbytes), np.uint8)
+                    scale_raw = np.zeros(ctx * 2, np.uint8)
+                else:
+                    if int(region.nbytes) != ctx * 2:
+                        raise AssertionError(f"{region.name} nbytes is not the float16 scale length")
+                    raw = np.zeros(ctx * head_dim * item_n, np.uint8)
+                    scale_raw = np.zeros(int(region.nbytes), np.uint8)
+                data_off, scale_off, _row = measure_views(
+                    raw, scale_raw, ctx, head_dim, kv_bits, pos)
+                # add() measures again on its own allocation. Require the region
+                # bytes and that fresh allocation to be the same offset.
+                again = measure_alloc(ctx, head_dim, kv_bits, pos)
+                if (data_off, scale_off) != (again[0], again[1]):
+                    raise AssertionError("region-length view does not match a fresh allocation")
+                add(layer_base, head, kind, lay_data, lay_scale, pos, ctx, head_dim, kv_bits,
+                    layout=True, region_off=region_off, img=img)
+                n_layout += 1
+    if n_layout < 4:
+        raise AssertionError("tiny DDRImage produced too few KV regions")
+
+    saw = {name: False for name in (
+        "k", "ks", "v", "vs", "k8", "k16", "pos0", "pos_last", "k0_base",
+        "scale_sel", "data_sel", "sum_under", "sum_exact", "sum_residue",
+        "base_over", "row_over", "row_wide", "pos_ge", "bits4", "ctx0", "hd0",
+        "both_fault", "reset", "layout",
+    )}
+    for index, vec in enumerate(vecs):
+        legal = vec["exp_fault"] == 0
+        if legal and vec["kind"] == 0:
+            saw["k"] = True
+        if legal and vec["kind"] == 1:
+            saw["ks"] = True
+        if legal and vec["kind"] == 2:
+            saw["v"] = True
+        if legal and vec["kind"] == 3:
+            saw["vs"] = True
+        if legal and vec["kv_bits"] == 8:
+            saw["k8"] = True
+        if legal and vec["kv_bits"] == 16:
+            saw["k16"] = True
+        if legal and vec["pos"] == 0:
+            saw["pos0"] = True
+        if legal and vec["pos"] == vec["ctx"] - 1 and vec["ctx"] > 0:
+            saw["pos_last"] = True
+        if (legal and vec["head"] == 0 and vec["kind"] == 0 and vec["off"] == 0
+                and vec["exp_addr"] == vec["base"] == vec["region"] and vec["base"] != 0):
+            saw["k0_base"] = True
+        if (legal and is_scale(vec["kind"]) and vec["data_off"] != vec["scale_off"]
+                and vec["exp_addr"] == vec["region"] + vec["scale_off"]):
+            saw["scale_sel"] = True
+        if (legal and not is_scale(vec["kind"]) and vec["data_off"] != vec["scale_off"]
+                and vec["exp_addr"] == vec["region"] + vec["data_off"]):
+            saw["data_sel"] = True
+        if (legal and vec["total"] == limit - 1 and vec["exp_addr"] == limit - 1
+                and vec["region"] < limit and vec["off"] not in (None, 0)):
+            saw["sum_under"] = True
+        if (vec["exp_fault"] and not vec["base_fault"] and not vec["row_fault"]
+                and vec["total"] == limit and vec["exp_addr"] == 0):
+            saw["sum_exact"] = True
+        if (vec["exp_fault"] and not vec["base_fault"] and not vec["row_fault"]
+                and vec["total"] is not None and vec["total"] > limit
+                and (vec["total"] % limit) != 0 and vec["exp_addr"] == 0
+                and vec["region"] != vec["base"]):
+            saw["sum_residue"] = True
+        if (vec["base_fault"] and not vec["row_fault"] and vec["off"] not in (None, 0)
+                and vec["exp_fault"] and vec["exp_addr"] == 0):
+            saw["base_over"] = True
+        if (vec["row_fault"] and not vec["base_fault"] and vec["region"] not in (0, None)
+                and vec["kv_bits"] in (8, 16) and vec["ctx"] != 0 and vec["head_dim"] != 0
+                and vec["pos"] < vec["ctx"] and vec["exp_fault"] and vec["exp_addr"] == 0):
+            wide = contiguous_bytes(vec["pos"], vec["head_dim"], vec["kv_bits"])
+            if wide[0] >= limit or wide[1] >= limit:
+                saw["row_over"] = True
+            if wide[2] >= (1 << 32) and wide[0] < limit and wide[1] < limit:
+                saw["row_wide"] = True
+        if (vec["row_fault"] and vec["ctx"] != 0 and vec["pos"] >= vec["ctx"]
+                and vec["kv_bits"] in (8, 16) and vec["head_dim"] != 0 and vec["region"] != 0):
+            saw["pos_ge"] = True
+        if vec["row_fault"] and vec["kv_bits"] == 4 and vec["region"] != 0:
+            saw["bits4"] = True
+        if vec["row_fault"] and vec["ctx"] == 0 and vec["region"] != 0:
+            saw["ctx0"] = True
+        if vec["row_fault"] and vec["head_dim"] == 0 and vec["ctx"] != 0 and vec["region"] != 0:
+            saw["hd0"] = True
+        if vec["base_fault"] and vec["row_fault"] and vec["exp_fault"] and vec["exp_addr"] == 0:
+            saw["both_fault"] = True
+        if vec["flags"] & 2:
+            if index + 1 >= len(vecs) or vecs[index + 1]["exp_fault"]:
+                raise AssertionError("a reset beat must be followed by a measured success")
+            if vecs[index + 1]["exp_addr"] == 0:
+                raise AssertionError("post-reset beat expects address 0")
+            saw["reset"] = True
+        if vec["layout"]:
+            saw["layout"] = True
+    missing = [name for name, ok in saw.items() if not ok]
+    if missing:
+        raise AssertionError(f"kv_abs vector set is missing {missing}")
+    if vecs[0]["exp_addr"] == vecs[1]["exp_addr"] and vecs[0]["exp_fault"] == vecs[1]["exp_fault"]:
+        raise AssertionError("first two vectors do not differ")
+
+    directory, binary, env = build(
+        "kv_abs_addr", {"ADDR_W": addr_w}, "kv_abs_main.cpp",
+        {"KV_ADDR_W": addr_w}, *toolchain,
+        extra_sv=("kv_addr_unit.sv", "kv_row_off.sv"))
+    vectors = directory / "vectors.txt"
+    with vectors.open("w", encoding="ascii") as out:
+        out.write(f"KA1\n{len(vecs)}\n")
+        for vec in vecs:
+            out.write(
+                f"{vec['flags']:x} {vec['base']:x} {vec['head']:x} {vec['kind']:x} "
+                f"{vec['data']:x} {vec['scale']:x} {vec['pos']:x} {vec['ctx']:x} "
+                f"{vec['head_dim']:x} {vec['kv_bits']:x} {vec['exp_addr']:x} {vec['exp_fault']:x}\n")
+    results = directory / "results.txt"
+    report = run([binary, vectors, results, seed], directory, env, "simulate")
+
+    def field(key):
+        for tok in report.split():
+            if tok.startswith(key + "="):
+                return int(tok.split("=", 1)[1])
+        raise AssertionError(f"kv_abs report missing {key}: {report}")
+
+    if field("addr_w") != addr_w or field("n") != len(vecs):
+        raise AssertionError(f"kv_abs report does not match the vector file: {report}")
+    if field("bubbles") <= 0 or field("stalled") <= 0 or field("resets") <= 0:
+        raise AssertionError(f"kv_abs handshake was not exercised: {report}")
+    lines = [ln.split() for ln in results.read_text(encoding="ascii").splitlines() if ln.strip()]
+    if len(lines) != len(vecs):
+        raise AssertionError(f"kv_abs results {len(lines)} != {len(vecs)}")
+    for index, (parts, vec) in enumerate(zip(lines, vecs)):
+        if len(parts) != 2:
+            raise AssertionError(f"kv_abs result line {index}")
+        got_addr = int(parts[0], 16)
+        got_fault = int(parts[1], 16)
+        if got_addr != vec["exp_addr"] or got_fault != vec["exp_fault"]:
+            raise AssertionError(
+                f"kv_abs[{index}] rtl {got_addr:#x} fault {got_fault} != "
+                f"addr {vec['exp_addr']:#x} fault {vec['exp_fault']}")
+    print(report, flush=True)
+    return {"module": "kv_abs_addr", "addr_w": addr_w, "n": len(vecs), "report": report}
+
+
 def write_rtl_report(summary):
     out = BASE / "out"
     out.mkdir(exist_ok=True)
@@ -1734,6 +2216,8 @@ def write_rtl_report(summary):
             config = f"ADDR_W={test['addr_w']}, n={test['n']}"
         elif module == "kv_row_off":
             config = f"OFF_W={test['off_w']}, n={test['n']}"
+        elif module == "kv_abs_addr":
+            config = f"ADDR_W={test['addr_w']}, n={test['n']}"
         elif "max_beats" in test:
             config = f"DATA_W={test['data_w']}, MAX_BEATS={test['max_beats']}, cases={test['cases']}"
         else:
@@ -1763,6 +2247,8 @@ def write_rtl_report(summary):
         "",
         "kv_row_off 只对拍区内 token 行偏移（MMU._kv 的 reshape(ctx, head_dim) 与 scale[pos] 的字节偏移，以及 data[pos].nbytes），不加区基址，没有 DDR / 多 HP / tok/s。",
         "",
+        "kv_abs_addr 只是区基址加区内偏移：kv_addr_unit 的 isa.kv_addr 加上 kv_row_off 的 data[pos]（K/V）或 scale[pos]（KS/VS）。不把 layer_base 再加一次，也不把 data 行偏移加到 KS/VS 上。没有 DDR PHY / 多 HP / tok/s，不是 AXI 主机，不把地址送到 axi_read_master。",
+        "",
         "Checks include random stalls, held-valid stability, integer extrema, zero commands, cross-page tails, reset of a partial scale row, reset while a completed dot or scale result is stalled, a transfer ending exactly at 2^49, overflow rejection, and reset between AXI commands.",
         "",
         "Reproduce from step3: `python3 run_rtl_tests.py`.",
@@ -1775,12 +2261,12 @@ def write_rtl_report(summary):
         "rtl/gemv_tile.sv", "rtl/fp32_pkg.sv", "rtl/fp32_rsqrt.sv", "rtl/fp32_exp.sv",
         "rtl/spu_rmsnorm.sv", "rtl/spu_silu_mul.sv", "rtl/axi_page_bridge.sv",
         "rtl/axi_read_master.sv", "rtl/axi_write_master.sv", "rtl/dcu_issue.sv",
-        "rtl/kv_addr_unit.sv", "rtl/kv_row_off.sv",
+        "rtl/kv_addr_unit.sv", "rtl/kv_row_off.sv", "rtl/kv_abs_addr.sv",
         "rtl/tb/dot_main.cpp", "rtl/tb/page_main.cpp", "rtl/tb/scale_main.cpp", "rtl/tb/gemv_main.cpp",
         "rtl/tb/gemv_tile_main.cpp", "rtl/tb/spu_rmsnorm_main.cpp", "rtl/tb/spu_silu_main.cpp",
         "rtl/tb/fp32_unary_main.cpp", "rtl/tb/axi_main.cpp", "rtl/tb/axi_write_main.cpp",
         "rtl/tb/axi_page_main.cpp", "rtl/tb/dcu_issue_main.cpp", "rtl/tb/kv_addr_main.cpp",
-        "rtl/tb/kv_row_main.cpp",
+        "rtl/tb/kv_row_main.cpp", "rtl/tb/kv_abs_main.cpp",
         "rtl/tb/sim_common.h",
         "run_rtl_tests.py", "rtl_spu_golden.py", "kv260/axi_plan.py",
     ):
@@ -1792,7 +2278,7 @@ def write_rtl_report(summary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + dcu_issue + kv_addr (ADDR_W=49) + kv_row (OFF_W=49) + one AXI rw")
+    parser.add_argument("--quick", action="store_true", help="default dots/pages + scale/gemv + SPU leaves + gemv_tile(R=2) + axi_page + dcu_issue + kv_addr (ADDR_W=49) + kv_row (OFF_W=49) + kv_abs (ADDR_W=49) + one AXI rw")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -1824,6 +2310,8 @@ def main():
     reports.append(test_kv_addr(args.seed, toolchain))
     # One OFF_W=49 configuration on both --quick and the full matrix.
     reports.append(test_kv_row(args.seed, toolchain))
+    # One ADDR_W=49 configuration on both --quick and the full matrix.
+    reports.append(test_kv_abs(args.seed, toolchain))
     axi_wr_cfgs = [(128, 256)] if args.quick else [(128, 256), (64, 256), (32, 16)]
     reports += [test_axi_write(width, beats, args.seed, toolchain) for width, beats in axi_wr_cfgs]
     summary = {"status": "PASS", "simulator": str(simulator), "seed": args.seed,

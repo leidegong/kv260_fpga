@@ -2,7 +2,7 @@
 
 目标：VPU / SPU / MMU + DDR 权重分页，batch=1、1024上下文持续解码8–10 tokens/s。
 
-**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。完整 SPU 调度、DCU 执行、多口重排、KV 执行、PS/PL 集成和驱动仍需实现；AXI 读写主机与仿真用页桥、SPU 数值叶、多行 GEMV、`dcu_issue`（只译码/发射，不执行算子）、`kv_addr_unit`（只对拍 `isa.kv_addr` 的字节区基址，不是 token 行、不是 DDR PHY）和 `kv_row_off`（只对拍区内 token 行偏移，不加区基址，不是 DDR / 多 HP）已在 Verilator 下对拍。没有bitstream、完整真实checkpoint质量结果或板测速度。
+**当前是可运行的软件样机、模型导出链路和经过仿真的RTL叶模块；还不是完整可上板加速器。** 板卡环境尚未准备好，本机没有可用Vivado。完整 SPU 调度、DCU 执行、多口重排、KV 执行、PS/PL 集成和驱动仍需实现；AXI 读写主机与仿真用页桥、SPU 数值叶、多行 GEMV、`dcu_issue`（只译码/发射，不执行算子）、`kv_addr_unit`（只对拍 `isa.kv_addr` 的字节区基址，不是 token 行、不是 DDR PHY）、`kv_row_off`（只对拍区内 token 行偏移，不加区基址，不是 DDR / 多 HP）和 `kv_abs_addr`（只做区基址加区内偏移，不是 DDR / 多 HP）已在 Verilator 下对拍。没有bitstream、完整真实checkpoint质量结果或板测速度。
 
 实施规格见 [KV260 v0.2](../research/Step3_KV260实施规格_v0.2_2026-09-25.md)。P3 v0.1及旧P3性能报告保留作历史分析，不能用作KV260部署配置。新平台预算见 [KV260报告](out/kv260_report.md)。
 
@@ -71,6 +71,7 @@ python3 run_bundle.py bundles/qwen3-w4 --tokens-file tokens.json --reference che
 | `rtl/dcu_issue.sv` | 128-bit ISA 译码、CFG（aux 0..12）、直到 END 的发射；对拍 `isa.py` | 不执行算子，无层执行、不算 KV 地址、无 DDR、无时序/带宽/tok/s |
 | `rtl/kv_addr_unit.sv` | K/KS/V/VS 区字节基址，对拍 `isa.kv_addr`；默认 `ADDR_W=49` | 不是 token 行地址，不是 KV cache，不是 DDR PHY / 多 HP，无层执行、无 tok/s |
 | `rtl/kv_row_off.sv` | 区内 token 行偏移：`reshape(ctx, head_dim)` 的 `data[pos]` 与 `scale[pos]` 字节偏移，以及该行 `nbytes`；默认 `OFF_W=49` | 不加区基址，不是绝对 DDR 地址，不是行数据，不是 DDR PHY / 多 HP，无层执行、无 tok/s |
+| `rtl/kv_abs_addr.sv` | 绝对字节地址 = `kv_addr_unit` 区基址 + `kv_row_off` 区内偏移（K/V 用 `data[pos]`，KS/VS 用 `scale[pos]`）；默认 `ADDR_W=49` | 不重复加 `layer_base`，不是 DDR PHY / 多 HP，不是 AXI 主机，无 KV 读写执行、无 tok/s |
 
 A16表示有符号整数尾数，**不是IEEE FP16**。`scale_accum`的有限结果与`VPU.gemv`的FP32公式逐位一致（0 ULP）；NaN规范为`0x7fc00000`，不要求与主机libm的NaN位型相同。默认32路dot只用于功能验证；KV260性能模型中的128路持续流水尚需完整实现和时序验证。AXI读主机不是HP口驱动，也没有寄存器地址。
 
@@ -81,7 +82,7 @@ python3 run_rtl_tests.py
 
 使用实际Verilator仿真RTL，再与NumPy、现有页打包器和`split_read`比较。Windows需要MSVC C++工具链；Linux需要C++20编译器。Verilator可以装到 `rtl/.tools`。日志、向量、结果位于 `rtl/.build`，不会安装或修改全局设置；缺少工具或比较失败会返回非零。
 
-完整测试覆盖LANES 1/8/32/128、页宽组合、`scale_accum`、`gemv_row`、`gemv_tile`、SPU 叶、`axi_page_bridge`、`dcu_issue`、`kv_addr_unit`、`kv_row_off`，以及AXI读/写多种宽度。含随机停顿、结果反压、复位、极值与尾页。`--quick` 含默认dot/page、scale、单行GEMV、SPU叶、`gemv_tile`(R=2)、`axi_page_bridge`、`dcu_issue`、`kv_addr_unit`（只 `ADDR_W=49`）、`kv_row_off`（只 `OFF_W=49`）和一种AXI读+写。完整矩阵里 `kv_addr_unit` 与 `kv_row_off` 仍是这一档。SPU 对 libm 非逐位一致，见 `rtl/README.md`；完整 SPU/softmax 调度仍无。`dcu_issue` 只译码和发射，不对拍 `VPU.gemv`，不执行算子。`kv_addr_unit` 只对拍区字节基址，不是 token 行，没有 DDR PHY / 多 HP / tok/s。`kv_row_off` 只对拍区内行偏移，不加区基址，没有 DDR / 多 HP / tok/s。
+完整测试覆盖LANES 1/8/32/128、页宽组合、`scale_accum`、`gemv_row`、`gemv_tile`、SPU 叶、`axi_page_bridge`、`dcu_issue`、`kv_addr_unit`、`kv_row_off`、`kv_abs_addr`，以及AXI读/写多种宽度。含随机停顿、结果反压、复位、极值与尾页。`--quick` 含默认dot/page、scale、单行GEMV、SPU叶、`gemv_tile`(R=2)、`axi_page_bridge`、`dcu_issue`、`kv_addr_unit`（只 `ADDR_W=49`）、`kv_row_off`（只 `OFF_W=49`）、`kv_abs_addr`（只 `ADDR_W=49`）和一种AXI读+写。完整矩阵里 `kv_addr_unit`、`kv_row_off` 与 `kv_abs_addr` 仍是这一档。SPU 对 libm 非逐位一致，见 `rtl/README.md`；完整 SPU/softmax 调度仍无。`dcu_issue` 只译码和发射，不对拍 `VPU.gemv`，不执行算子。`kv_addr_unit` 只对拍区字节基址，不是 token 行，没有 DDR PHY / 多 HP / tok/s。`kv_row_off` 只对拍区内行偏移，不加区基址，没有 DDR / 多 HP / tok/s。`kv_abs_addr` 只是这两段相加，没有 DDR / 多 HP / tok/s。
 
 安装Vivado的K26器件支持后可运行：
 
@@ -113,6 +114,6 @@ python3 board_probe.py --out board_probe.json
 | `export_kv260.py` / `run_bundle.py` | 可校验软件部署包、无副作用镜像执行及精度对照 |
 | `platforms.py` / `kv260_report.py` | KV260端口、计算及存储预算；预测非板测 |
 | `kv260/axi_plan.py` / `board_probe.py` | AXI契约、只读板卡信息 |
-| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、单行/多行 GEMV、SPU 叶、AXI 读写、`dcu_issue` 译码/发射、`kv_addr_unit` 区基址、`kv_row_off` 区内行偏移，以及真实 RTL 仿真 |
+| `rtl/` / `run_rtl_tests.py` | 页分流、整数点积、FP32尺度累加、单行/多行 GEMV、SPU 叶、AXI 读写、`dcu_issue` 译码/发射、`kv_addr_unit` 区基址、`kv_row_off` 区内行偏移、`kv_abs_addr` 绝对字节地址，以及真实 RTL 仿真 |
 
 软件回归、unittest和RTL的当次结果见 [验证记录](out/validation_report.md)。实际部署的剩余工作见 [路线图](../docs/ROADMAP.md)。
